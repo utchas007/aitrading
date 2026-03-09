@@ -1,0 +1,20 @@
+[Unit]
+Description=AI Trading Bot - 25% Daily Target
+After=network.target
+
+[Service]
+Type=simple
+User=aiminer2
+WorkingDirectory=/home/aiminer2/Trading Project/deepseek-ui
+ExecStart=/usr/bin/npm run dev
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/aiminer2/Trading Project/trading-bot.log
+StandardError=append:/home/aiminer2/Trading Project/trading-bot-error.log
+
+# Environment variables
+Environment="NODE_ENV=production"
+Environment="PATH=/usr/bin:/usr/local/bin:/home/aiminer2/.nvm/versions/node/v20.11.0/bin"
+
+[Install]
+WantedBy=multi-user.target

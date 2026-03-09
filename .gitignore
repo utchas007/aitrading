@@ -1,0 +1,47 @@
+# Environment variables with sensitive data
+.env.local
+.env
+*.env
+
+# API Keys and secrets
+deepseek-ui/.env.local
+deepseek-ui/.env
+
+# Logs
+*.log
+trading-bot.log
+
+# Process IDs
+*.pid
+trading-bot.pid
+
+# Node modules
+node_modules/
+deepseek-ui/node_modules/
+
+# Next.js build output
+deepseek-ui/.next/
+deepseek-ui/out/
+
+# Production build
+deepseek-ui/build/
+deepseek-ui/dist/
+
+# Cache
+.cache/
+.turbo/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/

@@ -1,0 +1,243 @@
+/**
+ * Risk Management Module for Trading Bot
+ * Implements position sizing, stop-loss, and portfolio risk controls
+ */
+
+export interface RiskParameters {
+  maxPositionSize: number; // Maximum % of portfolio per trade (e.g., 0.1 = 10%)
+  maxPortfolioRisk: number; // Maximum % of portfolio at risk (e.g., 0.02 = 2%)
+  stopLossPercent: number; // Stop loss % from entry (e.g., 0.05 = 5%)
+  takeProfitPercent: number; // Take profit % from entry (e.g., 0.10 = 10%)
+  maxOpenPositions: number; // Maximum number of concurrent positions
+  minConfidence: number; // Minimum AI confidence to execute trade (0-100)
+}
+
+export interface Position {
+  pair: string;
+  type: 'buy' | 'sell';
+  entryPrice: number;
+  volume: number;
+  stopLoss: number;
+  takeProfit: number;
+  currentPrice: number;
+}
+
+export interface PortfolioState {
+  totalValue: number; // Total portfolio value in USD
+  availableCash: number; // Available cash for trading
+  positions: Position[];
+}
+
+export class RiskManager {
+  private params: RiskParameters;
+
+  constructor(params: Partial<RiskParameters> = {}) {
+    this.params = {
+      maxPositionSize: params.maxPositionSize || 0.1, // 10% default
+      maxPortfolioRisk: params.maxPortfolioRisk || 0.02, // 2% default
+      stopLossPercent: params.stopLossPercent || 0.05, // 5% default
+      takeProfitPercent: params.takeProfitPercent || 0.10, // 10% default
+      maxOpenPositions: params.maxOpenPositions || 3,
+      minConfidence: params.minConfidence || 70, // 70% confidence minimum
+    };
+  }
+
+  /**
+   * Calculate position size based on risk parameters
+   */
+  calculatePositionSize(
+    portfolioValue: number,
+    entryPrice: number,
+    stopLossPrice: number
+  ): number {
+    // Calculate risk per share
+    const riskPerShare = Math.abs(entryPrice - stopLossPrice);
+    
+    // Calculate maximum risk amount (2% of portfolio)
+    const maxRiskAmount = portfolioValue * this.params.maxPortfolioRisk;
+    
+    // Calculate position size based on risk
+    const positionSize = maxRiskAmount / riskPerShare;
+    
+    // Apply maximum position size constraint (10% of portfolio)
+    const maxPositionValue = portfolioValue * this.params.maxPositionSize;
+    const maxShares = maxPositionValue / entryPrice;
+    
+    return Math.min(positionSize, maxShares);
+  }
+
+  /**
+   * Calculate stop loss price
+   */
+  calculateStopLoss(entryPrice: number, type: 'buy' | 'sell'): number {
+    if (type === 'buy') {
+      return entryPrice * (1 - this.params.stopLossPercent);
+    } else {
+      return entryPrice * (1 + this.params.stopLossPercent);
+    }
+  }
+
+  /**
+   * Calculate take profit price
+   */
+  calculateTakeProfit(entryPrice: number, type: 'buy' | 'sell'): number {
+    if (type === 'buy') {
+      return entryPrice * (1 + this.params.takeProfitPercent);
+    } else {
+      return entryPrice * (1 - this.params.takeProfitPercent);
+    }
+  }
+
+  /**
+   * Validate if trade should be executed based on risk parameters
+   */
+  validateTrade(
+    portfolio: PortfolioState,
+    signal: {
+      type: 'buy' | 'sell';
+      pair: string;
+      confidence: number;
+      entryPrice: number;
+    }
+  ): { allowed: boolean; reason?: string } {
+    // Check confidence threshold
+    if (signal.confidence < this.params.minConfidence) {
+      return {
+        allowed: false,
+        reason: `Confidence ${signal.confidence}% below minimum ${this.params.minConfidence}%`,
+      };
+    }
+
+    // Check maximum open positions
+    if (portfolio.positions.length >= this.params.maxOpenPositions) {
+      return {
+        allowed: false,
+        reason: `Maximum open positions (${this.params.maxOpenPositions}) reached`,
+      };
+    }
+
+    // Check if already have position in this pair
+    const existingPosition = portfolio.positions.find(p => p.pair === signal.pair);
+    if (existingPosition) {
+      return {
+        allowed: false,
+        reason: `Already have open position in ${signal.pair}`,
+      };
+    }
+
+    // Calculate required capital
+    const stopLoss = this.calculateStopLoss(signal.entryPrice, signal.type);
+    const positionSize = this.calculatePositionSize(
+      portfolio.totalValue,
+      signal.entryPrice,
+      stopLoss
+    );
+    const requiredCapital = positionSize * signal.entryPrice;
+
+    // Check available cash
+    if (requiredCapital > portfolio.availableCash) {
+      return {
+        allowed: false,
+        reason: `Insufficient funds. Required: $${requiredCapital.toFixed(2)}, Available: $${portfolio.availableCash.toFixed(2)}`,
+      };
+    }
+
+    return { allowed: true };
+  }
+
+  /**
+   * Check if position should be closed (stop loss or take profit hit)
+   */
+  shouldClosePosition(position: Position): {
+    shouldClose: boolean;
+    reason?: 'stop-loss' | 'take-profit';
+  } {
+    if (position.type === 'buy') {
+      if (position.currentPrice <= position.stopLoss) {
+        return { shouldClose: true, reason: 'stop-loss' };
+      }
+      if (position.currentPrice >= position.takeProfit) {
+        return { shouldClose: true, reason: 'take-profit' };
+      }
+    } else {
+      if (position.currentPrice >= position.stopLoss) {
+        return { shouldClose: true, reason: 'stop-loss' };
+      }
+      if (position.currentPrice <= position.takeProfit) {
+        return { shouldClose: true, reason: 'take-profit' };
+      }
+    }
+
+    return { shouldClose: false };
+  }
+
+  /**
+   * Calculate current profit/loss for a position
+   */
+  calculatePnL(position: Position): {
+    pnl: number;
+    pnlPercent: number;
+  } {
+    let pnl: number;
+    if (position.type === 'buy') {
+      pnl = (position.currentPrice - position.entryPrice) * position.volume;
+    } else {
+      pnl = (position.entryPrice - position.currentPrice) * position.volume;
+    }
+
+    const pnlPercent = (pnl / (position.entryPrice * position.volume)) * 100;
+
+    return { pnl, pnlPercent };
+  }
+
+  /**
+   * Calculate portfolio risk metrics
+   */
+  calculatePortfolioRisk(portfolio: PortfolioState): {
+    totalRisk: number;
+    totalRiskPercent: number;
+    positionRisks: Array<{ pair: string; risk: number; riskPercent: number }>;
+  } {
+    const positionRisks = portfolio.positions.map(position => {
+      const riskPerShare = Math.abs(position.entryPrice - position.stopLoss);
+      const risk = riskPerShare * position.volume;
+      const riskPercent = (risk / portfolio.totalValue) * 100;
+
+      return {
+        pair: position.pair,
+        risk,
+        riskPercent,
+      };
+    });
+
+    const totalRisk = positionRisks.reduce((sum, p) => sum + p.risk, 0);
+    const totalRiskPercent = (totalRisk / portfolio.totalValue) * 100;
+
+    return {
+      totalRisk,
+      totalRiskPercent,
+      positionRisks,
+    };
+  }
+
+  /**
+   * Get risk parameters
+   */
+  getParameters(): RiskParameters {
+    return { ...this.params };
+  }
+
+  /**
+   * Update risk parameters
+   */
+  updateParameters(params: Partial<RiskParameters>): void {
+    this.params = { ...this.params, ...params };
+  }
+}
+
+/**
+ * Create a risk manager instance with default or custom parameters
+ */
+export function createRiskManager(params?: Partial<RiskParameters>): RiskManager {
+  return new RiskManager(params);
+}
