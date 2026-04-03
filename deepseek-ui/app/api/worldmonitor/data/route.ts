@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const WORLDMONITOR_BASE_URL = 'http://localhost:3000';
+const WORLDMONITOR_BASE_URL = process.env.WORLDMONITOR_URL || 'http://localhost:3003';
 
 /**
  * Proxy endpoint to fetch World Monitor Finance data

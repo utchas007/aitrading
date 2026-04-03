@@ -1,7 +1,21 @@
 /**
  * Activity Logger
  * Tracks and broadcasts bot activities in real-time
+ * Also persists to PostgreSQL database
  */
+
+// Async DB write — fire and forget, never blocks the bot
+async function persistToDb(type: string, message: string, pair?: string): Promise<void> {
+  try {
+    // Dynamic import to avoid issues if DB is not available
+    const { prisma } = await import('./db');
+    await prisma.activityLog.create({
+      data: { type, message, pair: pair || null },
+    });
+  } catch {
+    // Silently fail — DB persistence is non-critical
+  }
+}
 
 export type ActivityType = 
   | 'searching'
@@ -53,6 +67,9 @@ export class ActivityLogger {
     // Console log with color
     const timeStr = new Date(activity.timestamp).toLocaleTimeString();
     console.log(`[${timeStr}] ${activity.icon} ${message}`);
+
+    // Persist to database (fire and forget)
+    persistToDb(type, message);
   }
 
   /**

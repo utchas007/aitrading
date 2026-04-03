@@ -8,10 +8,14 @@ export async function GET(req: NextRequest) {
   try {
     const kraken = createKrakenClient();
     const balance = await kraken.getBalance();
+    const tradeBalance = await kraken.getTradeBalance();
 
     return NextResponse.json({
       success: true,
       balance,
+      totalValue: parseFloat(tradeBalance.eb), // Equivalent balance in CAD
+      equity: parseFloat(tradeBalance.e), // Total equity
+      tradeBalance: tradeBalance,
     });
   } catch (error: any) {
     console.error('Kraken balance error:', error);

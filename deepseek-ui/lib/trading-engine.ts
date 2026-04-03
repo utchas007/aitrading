@@ -3,10 +3,48 @@
  * Monitors markets, generates signals, and executes trades automatically
  */
 
-import { createKrakenClient } from './kraken';
+import { createIBClient } from './ib-client';
 import { analyzeTechnicalIndicators, getHistoricalPrices, TechnicalSignals } from './technical-indicators';
 import { createRiskManager, RiskManager } from './risk-management';
 import { logActivity } from './activity-logger';
+import {
+  getMarketSentiment, calculateEnhancedIndicators, calculatePositionSize,
+  SentimentSummary,
+} from './market-intelligence';
+import {
+  getWorldMonitorSummary, getMarketContextForAI, GeopoliticalRisk,
+} from './worldmonitor-data';
+
+// Async DB write — fire and forget, never blocks the bot
+async function saveSignalToDb(signal: TradeSignal, marketSentiment?: SentimentSummary | null): Promise<void> {
+  try {
+    const { prisma } = await import('./db');
+    await prisma.tradingSignal.create({
+      data: {
+        pair: signal.pair,
+        action: signal.action,
+        confidence: signal.confidence,
+        entryPrice: signal.entryPrice,
+        stopLoss: signal.stopLoss,
+        takeProfit: signal.takeProfit,
+        positionSize: signal.positionSize,
+        reasoning: signal.reasoning,
+        rsi: signal.technicalSignals.rsi,
+        rsiSignal: signal.technicalSignals.rsiSignal,
+        macdTrend: signal.technicalSignals.macd.trend,
+        bbPosition: signal.technicalSignals.bollingerBands.position,
+        emaTrend: signal.technicalSignals.ema.trend,
+        volumeSpike: signal.technicalSignals.volume.spike,
+        fearGreedValue: marketSentiment?.fearGreed.value,
+        fearGreedClass: marketSentiment?.fearGreed.classification,
+        overallSentiment: marketSentiment?.overallSentiment,
+        executed: false,
+      },
+    });
+  } catch (e) {
+    console.error('Failed to save signal to DB:', e);
+  }
+}
 
 export interface TradeSignal {
   pair: string;
@@ -44,6 +82,10 @@ export interface TradingEngineConfig {
   stopLossPercent: number; // 0-1
   takeProfitPercent: number; // 0-1
   autoExecute: boolean;
+  tradingFeePercent: number; // Transaction fee per trade (e.g., 0.0026 = 0.26%)
+  minProfitMargin: number; // Minimum profit margin above fees (e.g., 0.03 = 3%)
+  tradeCooldownHours: number; // Hours to wait before re-trading same pair
+  maxDailyTrades: number; // Maximum trades per day
 }
 
 export class TradingEngine {
@@ -52,17 +94,24 @@ export class TradingEngine {
   private isRunning: boolean = false;
   private intervalId?: NodeJS.Timeout;
   private activePositions: Map<string, ActivePosition> = new Map();
+  private lastTradeTime: Map<string, number> = new Map(); // Track last trade time per pair
+  private dailyTradeCount: number = 0;
+  private lastResetDate: string = new Date().toDateString();
 
   constructor(config: Partial<TradingEngineConfig> = {}) {
     this.config = {
-      pairs: config.pairs || ['XXBTZUSD', 'XETHZUSD', 'XLTCZUSD', 'XXRPZUSD'],
-      checkInterval: config.checkInterval || 5 * 60 * 1000, // 5 minutes
-      minConfidence: config.minConfidence || 75,
-      maxPositions: config.maxPositions || 3,
-      riskPerTrade: config.riskPerTrade || 0.25, // 25% of capital per trade
-      stopLossPercent: config.stopLossPercent || 0.08, // 8% stop loss
-      takeProfitPercent: config.takeProfitPercent || 0.30, // 30% take profit (targeting 25% avg)
+      pairs: config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA'],
+      checkInterval: config.checkInterval || 30 * 60 * 1000, // 30 minutes
+      minConfidence: config.minConfidence || 85,
+      maxPositions: config.maxPositions || 4,
+      riskPerTrade: config.riskPerTrade || 0.10, // 10% of available cash per trade
+      stopLossPercent: config.stopLossPercent || 0.05, // 5% stop loss
+      takeProfitPercent: config.takeProfitPercent || 0.10, // 10% take profit
       autoExecute: config.autoExecute || false,
+      tradingFeePercent: config.tradingFeePercent || 0.0005, // IB ~$0.005/share ≈ 0.05% round-trip
+      minProfitMargin: config.minProfitMargin || 0.02, // 2% minimum profit above fees
+      tradeCooldownHours: config.tradeCooldownHours || 4,
+      maxDailyTrades: config.maxDailyTrades || 4,
     };
 
     this.riskManager = createRiskManager({
@@ -126,19 +175,35 @@ export class TradingEngine {
     logActivity.analyzing(`Checking markets for ${this.config.pairs.length} pairs...`);
 
     try {
+      // Reset daily trade counter if new day
+      this.resetDailyTradeCountIfNeeded();
+      
+      // Save portfolio snapshot before checking markets
+      await this.savePortfolioSnapshot();
+      
       // Update active positions
       await this.updatePositions();
 
-      // Check each trading pair
+      // Check each trading pair — 12s delay between symbols to respect IB pacing limits
       for (const pair of this.config.pairs) {
         try {
           logActivity.analyzing(`Analyzing ${pair}...`);
+          await new Promise(r => setTimeout(r, 12000)); // IB allows ~6 req/min per symbol
           const signal = await this.generateSignal(pair);
           
           // Log the signal details
           logActivity.calculating(`${pair}: RSI ${signal.technicalSignals.rsi.toFixed(1)}, MACD ${signal.technicalSignals.macd.trend}, Confidence ${signal.confidence}%`);
           
           if (signal.action !== 'hold' && signal.confidence >= this.config.minConfidence) {
+            // Check if trade is allowed (cooldown, daily limit, profit margin)
+            const tradeAllowed = this.isTradeAllowed(signal);
+            
+            if (!tradeAllowed.allowed) {
+              logActivity.warning(`❌ Trade blocked for ${pair}: ${tradeAllowed.reason}`);
+              console.log(`\n❌ Trade blocked for ${pair}: ${tradeAllowed.reason}`);
+              continue;
+            }
+            
             console.log(`\n🎯 Signal generated for ${pair}:`);
             console.log(`   Action: ${signal.action.toUpperCase()}`);
             console.log(`   Confidence: ${signal.confidence}%`);
@@ -146,10 +211,15 @@ export class TradingEngine {
             console.log(`   Stop Loss: $${signal.stopLoss.toFixed(2)}`);
             console.log(`   Take Profit: $${signal.takeProfit.toFixed(2)}`);
             console.log(`   Position Size: ${signal.positionSize.toFixed(8)}`);
+            console.log(`   Expected Profit: ${tradeAllowed.expectedProfitPercent?.toFixed(2)}% (after fees)`);
             console.log(`   Reasoning: ${signal.reasoning}`);
 
             logActivity.info(`🎯 Signal: ${signal.action.toUpperCase()} ${pair} | Confidence: ${signal.confidence}% | Entry: $${signal.entryPrice.toFixed(2)}`);
             logActivity.info(`📊 ${signal.reasoning}`);
+            logActivity.info(`💰 Expected profit: ${tradeAllowed.expectedProfitPercent?.toFixed(2)}% after ${(this.config.tradingFeePercent * 200).toFixed(2)}% fees`);
+            
+            // Save signal to database
+            saveSignalToDb(signal, marketSentiment).catch(() => {});
 
             if (this.config.autoExecute) {
               await this.executeSignal(signal);
@@ -191,17 +261,23 @@ export class TradingEngine {
   }
 
   /**
-   * Get AI sentiment analysis
+   * Get AI sentiment analysis — supports both stocks and crypto
    */
-  private async getAISentimentAnalysis(pair: string, news: any[], marketData: any): Promise<any> {
+  private async getAISentimentAnalysis(pair: string, news: any[], marketData: any, technicals?: any, worldContext?: string): Promise<any> {
     try {
+      // Detect if this is a stock symbol (uppercase letters only, 1-5 chars, no numbers)
+      const isStock = /^[A-Z]{1,5}$/.test(pair);
+
       const response = await fetch('http://localhost:3001/api/trading/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pair,
-          news: news.slice(0, 10), // Top 10 news items
+          news: news.slice(0, 10),
           marketData,
+          assetType: isStock ? 'stock' : 'crypto',
+          technicals: technicals ?? null,
+          worldContext: worldContext ?? null, // Global market context from World Monitor
         }),
       });
 
@@ -221,8 +297,8 @@ export class TradingEngine {
    * Generate trading signal for a pair
    */
   async generateSignal(pair: string): Promise<TradeSignal> {
-    // Get historical price data
-    const priceData = await getHistoricalPrices(pair, 5); // 5-minute candles
+    // Use daily bars — reliable, no IB pacing issues, good for swing trading signals
+    const priceData = await getHistoricalPrices(pair, 1440);
     
     if (priceData.length < 50) {
       throw new Error(`Insufficient price data for ${pair}`);
@@ -234,141 +310,170 @@ export class TradingEngine {
 
     // Fetch World Monitor news for fundamental analysis
     const news = await this.fetchWorldMonitorNews();
-    
-    // Get current market data for AI analysis
-    const kraken = createKrakenClient();
-    const ticker = await kraken.getTicker(this.config.pairs);
+
+    // Get current market data for AI analysis via IB
+    const ib = createIBClient();
     const marketData: any = {};
-    for (const p of this.config.pairs) {
-      if (ticker[p]) {
-        marketData[p] = {
-          price: ticker[p].c[0],
-          volume: ticker[p].v[1],
-          change24h: ticker[p].p ? ticker[p].p[1] : '0',
+    for (const symbol of this.config.pairs) {
+      try {
+        const t = await ib.getTicker(symbol);
+        marketData[symbol] = {
+          price:    t.last ?? t.close ?? currentPrice,
+          volume:   t.volume ?? 0,
+          change24h: '0',
         };
+      } catch {
+        marketData[symbol] = { price: currentPrice, volume: 0, change24h: '0' };
       }
     }
 
-    // Get AI sentiment analysis if news is available
+    // Get AI sentiment analysis — pass technicals so AI has full context
     let aiAnalysis = null;
-    if (news.length > 0) {
-      aiAnalysis = await this.getAISentimentAnalysis(pair, news, marketData);
+    const technicalsForAI = {
+      rsi: technicalSignals.rsi,
+      rsiSignal: technicalSignals.rsiSignal,
+      macd: technicalSignals.macd.trend,
+      overallSignal: technicalSignals.overallSignal,
+      confidence: technicalSignals.confidence,
+      price: currentPrice,
+      change: priceData.length >= 2
+        ? (((currentPrice - priceData[priceData.length - 2].close) / priceData[priceData.length - 2].close) * 100).toFixed(2)
+        : '0.00',
+    };
+
+    // Get World Monitor global context for AI analysis
+    let worldContext: string | undefined;
+    let worldMonitorData: Awaited<ReturnType<typeof getWorldMonitorSummary>> | null = null;
+    try {
+      worldMonitorData = await getWorldMonitorSummary();
+      worldContext = await getMarketContextForAI();
       
-      if (aiAnalysis) {
-        logActivity.info(`🤖 AI Sentiment for ${pair}: ${aiAnalysis.sentiment} | Signal: ${aiAnalysis.signal} | Confidence: ${aiAnalysis.confidence}%`);
+      // Log geopolitical risk if elevated
+      if (worldMonitorData.geopoliticalRisk.level !== 'low') {
+        logActivity.warning(`🌍 Geopolitical Risk: ${worldMonitorData.geopoliticalRisk.level.toUpperCase()} (${worldMonitorData.geopoliticalRisk.score}/100) | ${worldMonitorData.geopoliticalRisk.marketImpact}`);
       }
+      
+      // Log commodity prices impact
+      const oil = worldMonitorData.commodities.find(c => c.name.includes('Oil'));
+      if (oil && Math.abs(oil.changePercent) > 2) {
+        logActivity.info(`🛢️ Oil ${oil.changePercent > 0 ? 'up' : 'down'} ${Math.abs(oil.changePercent).toFixed(1)}% - may impact energy sector`);
+      }
+    } catch (e) {
+      // World Monitor data is optional enhancement
     }
 
-    // Determine action based on BOTH technical signals AND AI sentiment
+    // Always call AI analysis with full context
+    aiAnalysis = await this.getAISentimentAnalysis(pair, news, marketData, technicalsForAI, worldContext);
+    if (aiAnalysis) {
+      logActivity.info(`🤖 AI Sentiment for ${pair}: ${aiAnalysis.sentiment} | Signal: ${aiAnalysis.signal} | Confidence: ${aiAnalysis.confidence}%`);
+    }
+
+    // Calculate enhanced indicators (Stoch RSI, ATR, OBV, Ichimoku)
+    const enhanced = calculateEnhancedIndicators(priceData);
+    logActivity.calculating(`${pair}: StochRSI K=${enhanced.stochRSI.k.toFixed(1)} D=${enhanced.stochRSI.d.toFixed(1)} (${enhanced.stochRSI.signal}) | ATR=${enhanced.atrPercent.toFixed(2)}% | OBV=${enhanced.obv.trend} | Ichimoku=${enhanced.ichimoku.signal} | Volatility=${enhanced.volatilityLevel}`);
+
+    // ── Intelligence Steps 1-4: Sentiment, VIX, SPY Trend, Earnings ─────────
+    let marketSentiment: SentimentSummary | null = null;
+    try {
+      marketSentiment = await getMarketSentiment(pair);
+      const { fearGreed, vix, spyTrend, earnings } = marketSentiment;
+      logActivity.info(`😱 Fear&Greed: ${fearGreed.value} (${fearGreed.classification}) | VIX: ${vix.value.toFixed(1)} ${vix.level} | SPY: ${spyTrend.trend} | Earnings: ${earnings.riskLevel}`);
+      logActivity.info(`📊 Market bias: ${marketSentiment.overallSentiment} (score: ${marketSentiment.overallScore.toFixed(0)}) | Size mult: ${vix.positionSizeMultiplier}x`);
+
+      // Hard blocks — override everything
+      if (!vix.tradingAllowed) {
+        logActivity.warning(`🚫 ${pair}: VIX ${vix.value.toFixed(1)} too high — trading blocked`);
+        return { pair, action: 'hold', confidence: 0, entryPrice: currentPrice, stopLoss: currentPrice, takeProfit: currentPrice, positionSize: 0, reasoning: vix.interpretation, technicalSignals, timestamp: Date.now() };
+      }
+      if (!earnings.tradingAllowed) {
+        logActivity.warning(`🚫 ${pair}: ${earnings.interpretation}`);
+        return { pair, action: 'hold', confidence: 0, entryPrice: currentPrice, stopLoss: currentPrice, takeProfit: currentPrice, positionSize: 0, reasoning: earnings.interpretation, technicalSignals, timestamp: Date.now() };
+      }
+      // SPY downtrend: block new BUY signals — only allow sells/holds
+      if (spyTrend.trend === 'downtrend') {
+        logActivity.warning(`⚠️ ${pair}: SPY in downtrend — suppressing BUY signals`);
+      }
+    } catch (err) {
+      logActivity.warning(`Market intelligence unavailable for ${pair} — using technicals only`);
+    }
+
+    // ── Determine action: technicals + AI + market intelligence ──────────────
     let action: 'buy' | 'sell' | 'hold' = 'hold';
     let confidence = technicalSignals.confidence;
 
-    // Combine technical and fundamental analysis
     if (aiAnalysis) {
-      // Weight: 60% technical, 40% AI sentiment
       const technicalWeight = 0.6;
       const aiWeight = 0.4;
-      
-      // Convert AI signal to numeric score
-      let aiScore = 50; // neutral
-      if (aiAnalysis.signal === 'BUY') {
-        aiScore = aiAnalysis.confidence;
-      } else if (aiAnalysis.signal === 'SELL') {
-        aiScore = 100 - aiAnalysis.confidence;
-      }
-      
-      // Combine scores
-      const combinedConfidence = (technicalSignals.confidence * technicalWeight) + (aiScore * aiWeight);
-      confidence = Math.round(combinedConfidence);
-      
-      // Determine action based on combined analysis
+      let aiScore = 50;
+      if (aiAnalysis.signal === 'BUY') aiScore = aiAnalysis.confidence;
+      else if (aiAnalysis.signal === 'SELL') aiScore = 100 - aiAnalysis.confidence;
+
+      confidence = Math.round((technicalSignals.confidence * technicalWeight) + (aiScore * aiWeight));
+
       if (technicalSignals.overallSignal === 'strong_buy' || technicalSignals.overallSignal === 'buy') {
-        if (aiAnalysis.signal === 'BUY') {
-          action = 'buy';
-          confidence = Math.min(confidence + 10, 100); // Boost confidence when both agree
-        } else if (aiAnalysis.signal === 'SELL') {
-          action = 'hold'; // Conflicting signals = hold
-          confidence = 50;
-        } else {
-          action = 'buy';
-        }
+        if (aiAnalysis.signal === 'BUY') { action = 'buy'; confidence = Math.min(confidence + 10, 100); }
+        else if (aiAnalysis.signal === 'SELL') { action = 'hold'; confidence = 50; }
+        else { action = 'buy'; }
       } else if (technicalSignals.overallSignal === 'strong_sell' || technicalSignals.overallSignal === 'sell') {
-        if (aiAnalysis.signal === 'SELL') {
-          action = 'sell';
-          confidence = Math.min(confidence + 10, 100); // Boost confidence when both agree
-        } else if (aiAnalysis.signal === 'BUY') {
-          action = 'hold'; // Conflicting signals = hold
-          confidence = 50;
-        } else {
-          action = 'sell';
-        }
+        if (aiAnalysis.signal === 'SELL') { action = 'sell'; confidence = Math.min(confidence + 10, 100); }
+        else if (aiAnalysis.signal === 'BUY') { action = 'hold'; confidence = 50; }
+        else { action = 'sell'; }
       } else {
-        // Technical is neutral, follow AI if strong signal
-        if (aiAnalysis.signal === 'BUY' && aiAnalysis.confidence >= 70) {
-          action = 'buy';
-        } else if (aiAnalysis.signal === 'SELL' && aiAnalysis.confidence >= 70) {
-          action = 'sell';
-        }
+        if (aiAnalysis.signal === 'BUY' && aiAnalysis.confidence >= 70) action = 'buy';
+        else if (aiAnalysis.signal === 'SELL' && aiAnalysis.confidence >= 70) action = 'sell';
       }
     } else {
-      // No AI analysis available, use technical only
-      if (technicalSignals.overallSignal === 'strong_buy' || technicalSignals.overallSignal === 'buy') {
-        action = 'buy';
-      } else if (technicalSignals.overallSignal === 'strong_sell' || technicalSignals.overallSignal === 'sell') {
-        action = 'sell';
-      }
+      if (technicalSignals.overallSignal === 'strong_buy' || technicalSignals.overallSignal === 'buy') action = 'buy';
+      else if (technicalSignals.overallSignal === 'strong_sell' || technicalSignals.overallSignal === 'sell') action = 'sell';
     }
 
-    // Calculate stop loss and take profit
-    const stopLoss = action === 'buy'
-      ? currentPrice * (1 - this.config.stopLossPercent)
-      : currentPrice * (1 + this.config.stopLossPercent);
+    // Apply SPY downtrend filter — suppress BUY signals when market is falling
+    if (action === 'buy' && marketSentiment?.spyTrend.trend === 'downtrend') {
+      logActivity.warning(`${pair}: BUY suppressed — SPY downtrend. Switching to HOLD.`);
+      action = 'hold';
+      confidence = Math.min(confidence, 40);
+    }
 
+    // Apply sentiment penalty — reduce confidence when market is bearish
+    if (marketSentiment && marketSentiment.overallSentiment === 'Bearish') {
+      if (action === 'buy') confidence = Math.max(0, confidence - 15);
+    }
+
+    // ── Step 5: Fee-aware position sizing via ATR ─────────────────────────────
+    let availableCash = 10000;
+    try {
+      const balance = await ib.getBalance();
+      const cashKey = Object.keys(balance).find(k => k.startsWith('AvailableFunds_'));
+      if (cashKey) availableCash = parseFloat(balance[cashKey]);
+    } catch { /* use fallback */ }
+
+    const vixMultiplier = marketSentiment?.vix.positionSizeMultiplier ?? 1.0;
+    const earningsRisk = marketSentiment?.earnings.riskLevel ?? 'safe';
+    const sizing = calculatePositionSize(pair, currentPrice, enhanced.atr, availableCash, vixMultiplier, earningsRisk);
+
+    logActivity.info(`💰 ${sizing.interpretation}`);
+
+    // Block trade if fees eat profit
+    if (action !== 'hold' && !sizing.worthTrading) {
+      logActivity.warning(`${pair}: Trade not worth it — expected profit $${sizing.expectedProfit} < min $${sizing.minimumProfitNeeded} after fees`);
+      action = 'hold';
+    }
+
+    let positionSize = sizing.finalShares;
+    if (positionSize < 1) {
+      logActivity.warning(`${pair}: Position size < 1 share. Skipping.`);
+      action = 'hold';
+      positionSize = 0;
+    }
+
+    // Use ATR-based stops instead of fixed percentages
+    const stopLoss = action === 'buy'
+      ? sizing.stopLossPrice
+      : currentPrice * (1 + this.config.stopLossPercent);
     const takeProfit = action === 'buy'
-      ? currentPrice * (1 + this.config.takeProfitPercent)
+      ? sizing.takeProfitPrice
       : currentPrice * (1 - this.config.takeProfitPercent);
 
-    // Calculate position size based on pair and available balance
-    // Kraken minimum order sizes (CAD pairs):
-    const minimumSizes: { [key: string]: number } = {
-      // Major Cryptos (CAD pairs)
-      'XXBTZCAD': 0.0001, 'XETHZCAD': 0.001, 'XLTCZCAD': 0.01, 'XXRPZCAD': 10,
-      'ADACAD': 10, 'SOLCAD': 0.1, 'DOTCAD': 1, 'LINKCAD': 0.5,
-      'MATICCAD': 10, 'AVAXCAD': 0.5, 'ATOMCAD': 1, 'ALGOCAD': 10,
-      'UNICAD': 0.5, 'XLMCAD': 30, 'XMRCAD': 0.1, 'ETCCAD': 1,
-      'BCHCAD': 0.01, 'TRXCAD': 100, 'EOSCAD': 10, 'AAVECAD': 0.1,
-      
-      // More Cryptos (CAD pairs)
-      'DOGECAD': 100, 'APTCAD': 1, 'ARBCAD': 10, 'OPCAD': 5,
-      'NEARCAD': 5, 'FTMCAD': 20, 'CHZCAD': 50, 'ENJCAD': 20,
-      'COMPCAD': 0.05, 'MKRCAD': 0.01, 'SNXCAD': 5, 'CRVCAD': 20,
-      'SUSHICAD': 10, 'LRCCAD': 50, 'GRTCAD': 50, 'INJCAD': 1,
-    };
-
-    // With $50 CAD, calculate affordable position size
-    const availableCAD = 50; // $50 CAD balance
-    const positionValue = availableCAD * this.config.riskPerTrade; // 20% = $10
-    let positionSize = positionValue / currentPrice;
-    
-    // Ensure we meet minimum order size
-    const minSize = minimumSizes[pair] || 0.001;
-    positionSize = Math.max(positionSize, minSize);
-    
-    // Check if we can afford this position
-    const orderValue = positionSize * currentPrice;
-    if (orderValue > availableCAD * 0.9) { // Use max 90% of balance for safety
-      // Scale down to affordable size
-      positionSize = (availableCAD * 0.9) / currentPrice;
-      
-      // If still below minimum, skip this pair
-      if (positionSize < minSize) {
-        logActivity.warning(`${pair}: Position size ${positionSize.toFixed(8)} below minimum ${minSize}. Skipping.`);
-        action = 'hold';
-        confidence = 0;
-      }
-    }
-
-    // Generate reasoning including AI analysis
     const reasoning = this.generateReasoning(technicalSignals, aiAnalysis);
 
     return {
@@ -386,6 +491,70 @@ export class TradingEngine {
   }
 
   /**
+   * Reset daily trade counter if it's a new day
+   */
+  private resetDailyTradeCountIfNeeded(): void {
+    const today = new Date().toDateString();
+    if (today !== this.lastResetDate) {
+      this.dailyTradeCount = 0;
+      this.lastResetDate = today;
+      logActivity.info(`📅 New trading day started. Daily trade count reset.`);
+    }
+  }
+
+  /**
+   * Check if trade is allowed based on cooldown, daily limits, and profit margin
+   */
+  private isTradeAllowed(signal: TradeSignal): {
+    allowed: boolean;
+    reason?: string;
+    expectedProfitPercent?: number;
+  } {
+    // Check daily trade limit
+    if (this.dailyTradeCount >= this.config.maxDailyTrades) {
+      return {
+        allowed: false,
+        reason: `Daily trade limit reached (${this.config.maxDailyTrades} trades/day)`,
+      };
+    }
+
+    // Check cooldown period for this pair
+    const lastTrade = this.lastTradeTime.get(signal.pair);
+    if (lastTrade) {
+      const hoursSinceLastTrade = (Date.now() - lastTrade) / (1000 * 60 * 60);
+      if (hoursSinceLastTrade < this.config.tradeCooldownHours) {
+        const hoursRemaining = (this.config.tradeCooldownHours - hoursSinceLastTrade).toFixed(1);
+        return {
+          allowed: false,
+          reason: `Cooldown active. Wait ${hoursRemaining} more hours before trading ${signal.pair}`,
+        };
+      }
+    }
+
+    // Calculate expected profit after fees
+    const roundTripFee = this.config.tradingFeePercent * 2; // Buy + Sell
+    const expectedMove = signal.action === 'buy'
+      ? ((signal.takeProfit - signal.entryPrice) / signal.entryPrice)
+      : ((signal.entryPrice - signal.takeProfit) / signal.entryPrice);
+    
+    const expectedProfitPercent = (expectedMove - roundTripFee) * 100;
+
+    // Check if expected profit meets minimum margin
+    if (expectedProfitPercent < this.config.minProfitMargin * 100) {
+      return {
+        allowed: false,
+        reason: `Expected profit ${expectedProfitPercent.toFixed(2)}% below minimum ${(this.config.minProfitMargin * 100).toFixed(2)}% (after ${(roundTripFee * 100).toFixed(2)}% fees)`,
+        expectedProfitPercent,
+      };
+    }
+
+    return {
+      allowed: true,
+      expectedProfitPercent,
+    };
+  }
+
+  /**
    * Execute a trading signal
    */
   private async executeSignal(signal: TradeSignal): Promise<void> {
@@ -393,70 +562,58 @@ export class TradingEngine {
       console.log(`\n⚡ Executing ${signal.action.toUpperCase()} order for ${signal.pair}...`);
       logActivity.executing(`Executing ${signal.action.toUpperCase()} order for ${signal.pair}...`);
 
-      const kraken = createKrakenClient();
-      
-      // Only execute if action is buy or sell (not hold)
-      if (signal.action === 'hold') {
-        console.log('Signal is HOLD, skipping execution');
-        return;
-      }
+      const ib = createIBClient();
 
-      // Check balance before executing
+      if (signal.action === 'hold') return;
+
+      // For SELL: verify we actually hold shares via IB positions
       if (signal.action === 'sell') {
-        // Get current balance
-        const balance = await kraken.getBalance();
-        
-        // Extract the asset from the pair (e.g., XXRPZCAD -> XXRP, XXBTZCAD -> XXBT)
-        const asset = signal.pair.replace('CAD', '').replace('ZCAD', '');
-        
-        // Check if we own this asset
-        const assetBalance = parseFloat(balance[asset] || '0');
-        
-        if (assetBalance < signal.positionSize) {
-          console.log(`❌ Cannot sell ${signal.pair}: Insufficient balance`);
-          console.log(`   Required: ${signal.positionSize}, Available: ${assetBalance}`);
-          logActivity.warning(`Cannot sell ${signal.pair}: Don't own enough (need ${signal.positionSize}, have ${assetBalance})`);
+        const positions = await ib.getPositions();
+        const pos = positions.find(p => p.symbol === signal.pair && p.position > 0);
+        if (!pos) {
+          logActivity.warning(`Cannot sell ${signal.pair}: No IB position found`);
           return;
         }
-        
-        logActivity.info(`✅ Balance check passed: ${assetBalance} ${asset} available`);
+        // Sell only what we own
+        signal.positionSize = Math.min(signal.positionSize, pos.position);
+        logActivity.info(`✅ IB position found: ${pos.position} shares of ${signal.pair}`);
       }
 
-      // Place order
-      const result = await kraken.addOrder({
-        pair: signal.pair,
-        type: signal.action,
-        ordertype: 'market',
-        volume: signal.positionSize.toString(),
-        validate: !this.config.autoExecute, // Validate only if not auto-executing
+      // Place order via IB (validate_only=true in paper mode, false when live)
+      const result = await ib.placeOrder({
+        symbol:        signal.pair,
+        action:        signal.action === 'buy' ? 'BUY' : 'SELL',
+        quantity:      signal.positionSize,
+        order_type:    'MKT',
+        validate_only: !this.config.autoExecute,
       });
 
-      console.log(`✅ Order placed successfully!`);
-      console.log(`   Transaction ID: ${result.txid.join(', ')}`);
-
-      if (this.config.autoExecute) {
-        logActivity.completed(`✅ ${signal.action.toUpperCase()} ${signal.positionSize} ${signal.pair} at $${signal.entryPrice.toFixed(2)} | TXID: ${result.txid.join(', ')}`);
+      if (this.config.autoExecute && result.order_id) {
+        logActivity.completed(`✅ ${signal.action.toUpperCase()} ${signal.positionSize} ${signal.pair} at $${signal.entryPrice.toFixed(2)} | OrderID: ${result.order_id}`);
         logActivity.info(`🛡️ Stop-loss: $${signal.stopLoss.toFixed(2)} | 🎯 Take-profit: $${signal.takeProfit.toFixed(2)}`);
+        this.lastTradeTime.set(signal.pair, Date.now());
+        this.dailyTradeCount++;
+        logActivity.info(`📊 Daily trades: ${this.dailyTradeCount}/${this.config.maxDailyTrades}`);
       } else {
-        logActivity.completed(`✅ Order validated successfully (test mode)`);
+        logActivity.completed(`✅ Order validated (paper mode) — would ${signal.action.toUpperCase()} ${signal.positionSize} shares of ${signal.pair} at $${signal.entryPrice.toFixed(2)}`);
+        if (result.commission) logActivity.info(`💰 Estimated commission: $${result.commission}`);
       }
 
-      // Track position
-      if (result.txid && result.txid.length > 0) {
-        this.activePositions.set(result.txid[0], {
-          txid: result.txid[0],
-          pair: signal.pair,
-          type: signal.action,
-          entryPrice: signal.entryPrice,
-          volume: signal.positionSize,
-          stopLoss: signal.stopLoss,
-          takeProfit: signal.takeProfit,
-          currentPrice: signal.entryPrice,
-          pnl: 0,
-          pnlPercent: 0,
-          timestamp: signal.timestamp,
-        });
-      }
+      // Track position locally
+      const posId = result.order_id?.toString() ?? `${signal.pair}-${Date.now()}`;
+      this.activePositions.set(posId, {
+        txid:         posId,
+        pair:         signal.pair,
+        type:         signal.action,
+        entryPrice:   signal.entryPrice,
+        volume:       signal.positionSize,
+        stopLoss:     signal.stopLoss,
+        takeProfit:   signal.takeProfit,
+        currentPrice: signal.entryPrice,
+        pnl:          0,
+        pnlPercent:   0,
+        timestamp:    signal.timestamp,
+      });
     } catch (error: any) {
       console.error(`❌ Failed to execute order:`, error.message);
       logActivity.error(`Failed to execute ${signal.action} order for ${signal.pair}: ${error.message}`);
@@ -470,12 +627,12 @@ export class TradingEngine {
     if (this.activePositions.size === 0) return;
 
     try {
-      const kraken = createKrakenClient();
-      
+      const ib = createIBClient();
+
       for (const [txid, position] of this.activePositions) {
-        // Get current price
-        const ticker = await kraken.getTicker([position.pair]);
-        const currentPrice = parseFloat(ticker[position.pair].c[0]);
+        // Get current price via IB
+        const ticker = await ib.getTicker(position.pair);
+        const currentPrice = ticker.last ?? ticker.close ?? position.currentPrice;
 
         // Update position
         position.currentPrice = currentPrice;
@@ -524,15 +681,16 @@ export class TradingEngine {
     if (!position) return;
 
     try {
-      const kraken = createKrakenClient();
-      
+      const ib = createIBClient();
+
       // Place opposite order to close position
-      const closeType = position.type === 'buy' ? 'sell' : 'buy';
-      await kraken.addOrder({
-        pair: position.pair,
-        type: closeType,
-        ordertype: 'market',
-        volume: position.volume.toString(),
+      const closeAction = position.type === 'buy' ? 'SELL' : 'BUY';
+      await ib.placeOrder({
+        symbol:        position.pair,
+        action:        closeAction,
+        quantity:      position.volume,
+        order_type:    'MKT',
+        validate_only: false, // always execute closes
       });
 
       console.log(`✅ Position closed successfully`);
@@ -607,6 +765,22 @@ export class TradingEngine {
       config: this.config,
       activePositions: this.getActivePositions().length,
     };
+  }
+
+  /**
+   * Save portfolio snapshot
+   */
+  private async savePortfolioSnapshot(): Promise<void> {
+    try {
+      await fetch('http://localhost:3001/api/portfolio/snapshot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+    } catch (error) {
+      // Silently fail - portfolio tracking is optional
+      console.debug('Portfolio snapshot skipped:', error);
+    }
   }
 }
 

@@ -45,9 +45,10 @@ export default function ActivityFeed() {
         body: JSON.stringify({
           action: 'start',
           config: {
-            autoExecute: false, // Start in validation mode
+            autoExecute: true, // LIVE TRADING MODE
             minConfidence: 75,
             checkInterval: 5 * 60 * 1000, // 5 minutes
+            pairs: ['AAPL', 'MSFT', 'NVDA', 'TSLA'],
           },
         }),
       });
@@ -98,12 +99,12 @@ export default function ActivityFeed() {
   return (
     <div style={{
       background: '#0a0a14',
-      border: '1px solid #1a1a2e',
-      borderRadius: 12,
-      padding: 20,
+      borderRadius: 0,
+      padding: '16px 12px',
       height: '100%',
       display: 'flex',
       flexDirection: 'column',
+      overflow: 'hidden',
     }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>

@@ -4,11 +4,19 @@ import { useState, useRef, useEffect, useCallback } from "react";
 
 const MODELS = [
   { id: "deepseek-r1:14b", label: "DeepSeek R1 14B", provider: "DeepSeek" },
-  { id: "deepseek-r1:32b", label: "DeepSeek R1 32B", provider: "DeepSeek" },
-  { id: "deepseek-r1:70b", label: "DeepSeek R1 70B", provider: "DeepSeek" },
 ];
 
-const DEFAULT_SYSTEM = "You are an expert cryptocurrency trading assistant with deep knowledge of market analysis, technical indicators, and trading strategies. You have access to real-time market data and can provide detailed analysis, price predictions, and trading recommendations. Always provide direct, actionable answers about market conditions, trends, and trading opportunities. Never deflect questions or tell users to check elsewhere - analyze the data and provide your expert opinion.";
+const DEFAULT_SYSTEM = `You are an expert trading assistant connected to LIVE financial data sources:
+
+• Interactive Brokers (stocks): Real-time prices, positions, order execution
+• Kraken (crypto): BTC, ETH, SOL prices and portfolio
+• World Monitor (global): Commodities (Oil, Gold), Global indices (S&P, DAX, Nikkei), Geopolitical risks
+• News feeds: Breaking financial news from multiple sources
+• Trading Bot: Automated analysis every 5 minutes with technical indicators
+
+You HAVE full access to markets, finance, and tech data - it's injected into every prompt.
+Analyze the real-time data provided and give direct, specific answers.
+Never say you can't access markets or don't have data - you absolutely do!`;
 
 function TypingIndicator() {
   return (
@@ -49,11 +57,113 @@ export default function LLMControlPanel() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [totalTokens, setTotalTokens] = useState(0);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState("model");
   const [sessionStart] = useState(new Date());
+  const [safeMode, setSafeMode] = useState(false);
+  const [safeModeLoading, setSafeModeLoading] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saved'>('idle');
+  const [conversationId, setConversationId] = useState<number | null>(null);
+  const [chatHistory, setChatHistory] = useState<Array<{ id: number; title: string; messageCount: number; updatedAt: string }>>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Load chat history list
+  const loadChatHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetch('/api/chat/history');
+      const data = await res.json();
+      if (data.success) {
+        setChatHistory(data.conversations || []);
+      }
+    } catch (e) {
+      console.error('Failed to load chat history:', e);
+    }
+    setHistoryLoading(false);
+  };
+
+  // Load specific conversation
+  const loadConversation = async (id: number) => {
+    try {
+      const res = await fetch(`/api/chat/history?id=${id}`);
+      const data = await res.json();
+      if (data.success && data.conversation) {
+        setConversationId(id);
+        setMessages(data.conversation.messages.map((m: any) => ({
+          role: m.role,
+          content: m.content,
+          ts: new Date(m.createdAt),
+          tokens: m.tokens,
+          error: m.error,
+        })));
+        setModel(data.conversation.model);
+      }
+    } catch (e) {
+      console.error('Failed to load conversation:', e);
+    }
+  };
+
+  // Start new conversation
+  const startNewConversation = async () => {
+    try {
+      const res = await fetch('/api/chat/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create', model }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setConversationId(data.conversation.id);
+        setMessages([]);
+        setTotalTokens(0);
+      }
+    } catch (e) {
+      console.error('Failed to create conversation:', e);
+    }
+  };
+
+  // Save message to DB
+  const saveMessageToDb = async (role: string, content: string, tokens?: number, error?: boolean) => {
+    if (!conversationId) return;
+    try {
+      await fetch('/api/chat/history', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'message',
+          conversationId,
+          role,
+          content,
+          tokens,
+          error,
+        }),
+      });
+    } catch (e) {
+      console.error('Failed to save message:', e);
+    }
+  };
+
+  // Load saved settings and chat history on startup
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('llm-settings');
+      if (saved) {
+        const settings = JSON.parse(saved);
+        if (settings.model) setModel(settings.model);
+        if (settings.temperature !== undefined) setTemperature(settings.temperature);
+        if (settings.maxTokens) setMaxTokens(settings.maxTokens);
+        if (settings.systemPrompt) setSystemPrompt(settings.systemPrompt);
+      }
+    } catch (e) {
+      // Ignore errors loading settings
+    }
+    // Load chat history
+    loadChatHistory();
+    // Auto-create new conversation
+    startNewConversation();
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -66,6 +176,8 @@ export default function LLMControlPanel() {
     setMessages(newMessages);
     setInput("");
     setLoading(true);
+    // Save user message to DB
+    saveMessageToDb('user', input.trim());
 
     try {
       const res = await fetch("/api/chat", {
@@ -89,6 +201,8 @@ export default function LLMControlPanel() {
       const tokensUsed = data.tokens || 0;
       setTotalTokens(t => t + tokensUsed);
       setMessages(prev => [...prev, { role: "assistant", content: assistantText, ts: new Date(), tokens: tokensUsed }]);
+      // Save to DB
+      saveMessageToDb('assistant', assistantText, tokensUsed, false);
     } catch (e: any) {
       setMessages(prev => [...prev, { role: "assistant", content: `⚠ Error: ${e.message}`, ts: new Date(), error: true }]);
     }
@@ -99,7 +213,12 @@ export default function LLMControlPanel() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   };
 
-  const clearChat = () => { setMessages([]); setTotalTokens(0); };
+  const clearChat = () => {
+    setMessages([]);
+    setTotalTokens(0);
+    startNewConversation();
+    loadChatHistory();
+  };
 
   const selectedModel = MODELS.find(m => m.id === model);
   const uptime = Math.floor((new Date().getTime() - sessionStart.getTime()) / 1000);
@@ -110,7 +229,7 @@ export default function LLMControlPanel() {
       fontFamily: "'Berkeley Mono', 'Fira Code', 'Cascadia Code', monospace",
       background: "#080810",
       color: "#c8d0e0",
-      height: "100vh",
+      height: "calc(100vh - 52px)",
       display: "flex",
       flexDirection: "column",
       overflow: "hidden",
@@ -123,8 +242,6 @@ export default function LLMControlPanel() {
         ::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 2px; }
         @keyframes pulse { 0%,100%{opacity:0.3;transform:scale(0.8)} 50%{opacity:1;transform:scale(1)} }
         @keyframes fadeUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-        @keyframes scanline { 0%{transform:translateY(-100%)} 100%{transform:translateY(100vh)} }
-        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
         .msg-enter { animation: fadeUp 0.25s ease forwards; }
         .btn-primary {
           background: linear-gradient(135deg, #00ff9f22, #0066ff22);
@@ -164,52 +281,42 @@ export default function LLMControlPanel() {
         input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; background:#00ff9f; border-radius:50%; cursor:pointer; }
         textarea { resize: none; outline: none; }
         select { outline: none; cursor: pointer; }
+        @media (max-width: 900px) {
+          .llm-sidebar { width: 200px !important; min-width: 180px !important; }
+          .llm-topbar { padding: 8px 12px !important; }
+          .llm-topbar .stats { display: none !important; }
+        }
+        @media (max-width: 768px) {
+          .llm-sidebar { display: none !important; }
+        }
       `}</style>
 
-      {/* Scanline effect */}
-      <div style={{
-        position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
-        pointerEvents: "none", zIndex: 100, overflow: "hidden", opacity: 0.03,
-      }}>
-        <div style={{
-          width: "100%", height: "2px", background: "#fff",
-          animation: "scanline 6s linear infinite",
-        }} />
-      </div>
-
-      {/* Top Bar */}
-      <div style={{
+      {/* Compact Top Bar */}
+      <div className="llm-topbar" style={{
         display: "flex", alignItems: "center", gap: 12,
-        padding: "10px 20px",
+        padding: "8px 16px",
         borderBottom: "1px solid #1a1a2e",
         background: "#0a0a16",
         flexShrink: 0,
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 28, height: 28, background: "linear-gradient(135deg, #00ff9f, #0066ff)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ fontSize: 14 }}>⬡</span>
+          <div style={{ width: 24, height: 24, background: "linear-gradient(135deg, #00ff9f, #0066ff)", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <span style={{ fontSize: 12 }}>⬡</span>
           </div>
-          <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 15, letterSpacing: "0.1em", color: "#fff" }}>
-            LLM<span style={{ color: "#00ff9f" }}>CTRL</span>
+          <span style={{ fontWeight: 700, fontSize: 13, color: "#fff" }}>
+            AI<span style={{ color: "#00ff9f" }}>Chat</span>
           </span>
-        </div>
-
-        <div style={{ width: 1, height: 20, background: "#1a1a2e", margin: "0 4px" }} />
-
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#00ff9f", boxShadow: "0 0 6px #00ff9f" }} />
-          <span style={{ fontSize: 11, color: "#00ff9f", letterSpacing: "0.1em" }}>ONLINE</span>
+          <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#00ff9f", boxShadow: "0 0 6px #00ff9f", marginLeft: 4 }} />
         </div>
 
         <div style={{ flex: 1 }} />
 
-        <div style={{ display: "flex", gap: 20, fontSize: 11, color: "#444" }}>
-          <span>MDL: <span style={{ color: "#888" }}>{selectedModel?.label}</span></span>
-          <span>SESS: <span style={{ color: "#888" }}>{uptimeStr}</span></span>
-          <span>MSGS: <span style={{ color: "#888" }}>{messages.length}</span></span>
+        <div className="stats" style={{ display: "flex", gap: 16, fontSize: 11, color: "#555" }}>
+          <span>{selectedModel?.label}</span>
+          <span>{messages.length} msgs</span>
         </div>
 
-        <button className="btn-ghost" onClick={() => setSidebarOpen(s => !s)} style={{ fontSize: 14, padding: "4px 10px" }}>
+        <button className="btn-ghost" onClick={() => setSidebarOpen(s => !s)} style={{ fontSize: 12, padding: "4px 8px" }}>
           {sidebarOpen ? "⟩" : "⟨"}
         </button>
       </div>
@@ -221,7 +328,7 @@ export default function LLMControlPanel() {
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
           {/* Messages */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ flex: 1, overflowY: "auto", padding: "16px", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
 
             {messages.length === 0 && (
               <div style={{ margin: "auto", textAlign: "center", opacity: 0.5 }}>
@@ -289,55 +396,58 @@ export default function LLMControlPanel() {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Token bar */}
-          <div style={{ padding: "6px 24px", borderTop: "1px solid #0f0f20" }}>
-            <TokenBar used={totalTokens} max={8000} />
-          </div>
-
-          {/* Input */}
+          {/* Input Area */}
           <div style={{
-            padding: "14px 24px 18px",
+            padding: "12px 16px",
             background: "#0a0a14",
             borderTop: "1px solid #1a1a2e",
-            display: "flex", gap: 10, alignItems: "flex-end",
+            flexShrink: 0,
           }}>
-            <div style={{ flex: 1, position: "relative" }}>
+            {/* Token bar */}
+            <div style={{ marginBottom: 8 }}>
+              <TokenBar used={totalTokens} max={8000} />
+            </div>
+            
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={handleKey}
-                placeholder="Send a message… (Enter to send, Shift+Enter for newline)"
-                rows={3}
+                placeholder="Send a message… (Enter to send)"
+                rows={2}
                 style={{
-                  width: "100%",
+                  flex: 1,
                   background: "#0d0d1e",
                   border: "1px solid #2a2a4a",
                   borderRadius: 8,
-                  padding: "10px 14px",
+                  padding: "10px 12px",
                   color: "#c8d0e0",
                   fontFamily: "inherit",
-                  fontSize: 13.5,
-                  lineHeight: 1.6,
+                  fontSize: 13,
+                  lineHeight: 1.5,
                   transition: "border-color 0.2s",
+                  minHeight: 44,
                 }}
                 onFocus={e => (e.target as HTMLTextAreaElement).style.borderColor = "#00ff9f55"}
                 onBlur={e => (e.target as HTMLTextAreaElement).style.borderColor = "#2a2a4a"}
               />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <button className="btn-primary" onClick={sendMessage} disabled={loading || !input.trim()}>
-                {loading ? "▶▶" : "▶ SEND"}
-              </button>
-              <button className="btn-ghost" onClick={clearChat}>CLR</button>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="btn-primary" onClick={sendMessage} disabled={loading || !input.trim()} style={{ padding: "10px 14px" }}>
+                  {loading ? "▶▶" : "▶"}
+                </button>
+                <button className="btn-ghost" onClick={clearChat} style={{ padding: "10px 12px" }}>CLR</button>
+              </div>
             </div>
           </div>
         </div>
 
         {/* Sidebar */}
         {sidebarOpen && (
-          <div style={{
-            width: 280,
+          <div className="llm-sidebar" style={{
+            width: 260,
+            maxWidth: '22vw',
+            minWidth: 200,
             borderLeft: "1px solid #1a1a2e",
             background: "#0a0a14",
             display: "flex",
@@ -346,15 +456,51 @@ export default function LLMControlPanel() {
             flexShrink: 0,
           }}>
             {/* Tabs */}
-            <div style={{ display: "flex", borderBottom: "1px solid #1a1a2e", padding: "0 12px" }}>
-              {["model", "params", "system"].map(t => (
-                <button key={t} className={`tab-btn ${settingsTab === t ? "active" : ""}`} onClick={() => setSettingsTab(t)}>
-                  {t.toUpperCase()}
+            <div style={{ display: "flex", borderBottom: "1px solid #1a1a2e", padding: "0 8px", flexWrap: "wrap" }}>
+              {["history", "model", "params", "system"].map(t => (
+                <button key={t} className={`tab-btn ${settingsTab === t ? "active" : ""}`} onClick={() => { setSettingsTab(t); if (t === 'history') loadChatHistory(); }} style={{ padding: "6px 8px", fontSize: 10 }}>
+                  {t === 'history' ? '📜' : ''}{t.toUpperCase()}
                 </button>
               ))}
             </div>
 
-            <div style={{ flex: 1, overflowY: "auto", padding: "16px" }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px" }}>
+
+              {settingsTab === "history" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <button className="btn-primary" onClick={() => { clearChat(); }} style={{ width: "100%", marginBottom: 8 }}>
+                    + New Chat
+                  </button>
+                  {historyLoading ? (
+                    <div style={{ textAlign: "center", color: "#555", padding: 20 }}>Loading...</div>
+                  ) : chatHistory.length === 0 ? (
+                    <div style={{ textAlign: "center", color: "#555", padding: 20, fontSize: 12 }}>No chat history yet</div>
+                  ) : (
+                    chatHistory.map(chat => (
+                      <div
+                        key={chat.id}
+                        onClick={() => loadConversation(chat.id)}
+                        style={{
+                          padding: "10px 12px",
+                          background: conversationId === chat.id ? "#00ff9f11" : "#0d0d1e",
+                          border: `1px solid ${conversationId === chat.id ? "#00ff9f44" : "#1a1a2e"}`,
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          transition: "all 0.2s",
+                        }}
+                      >
+                        <div style={{ fontSize: 12, color: conversationId === chat.id ? "#00ff9f" : "#888", fontWeight: 600, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {chat.title || "New Chat"}
+                        </div>
+                        <div style={{ fontSize: 10, color: "#444", display: "flex", justifyContent: "space-between" }}>
+                          <span>{chat.messageCount} msgs</span>
+                          <span>{new Date(chat.updatedAt).toLocaleDateString()}</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
 
               {settingsTab === "model" && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -430,6 +576,7 @@ export default function LLMControlPanel() {
                       </button>
                     ))}
                   </div>
+
                 </div>
               )}
 
@@ -440,7 +587,7 @@ export default function LLMControlPanel() {
                     <textarea
                       value={systemPrompt}
                       onChange={e => setSystemPrompt(e.target.value)}
-                      rows={8}
+                      rows={6}
                       style={{
                         width: "100%", background: "#0d0d1e",
                         border: "1px solid #2a2a4a", borderRadius: 6,
@@ -451,27 +598,55 @@ export default function LLMControlPanel() {
                       onBlur={e => (e.target as HTMLTextAreaElement).style.borderColor = "#2a2a4a"}
                     />
                   </div>
+                  
                   <div style={{ fontSize: 10, color: "#555", letterSpacing: "0.1em", marginBottom: 4 }}>QUICK PERSONAS</div>
                   {[
-                    { label: "Trading Expert", prompt: DEFAULT_SYSTEM },
-                    { label: "Technical Analyst", prompt: "You are a cryptocurrency technical analyst specializing in chart patterns, indicators, and price action. Provide detailed technical analysis with specific entry/exit points, support/resistance levels, and risk management advice." },
-                    { label: "Market Researcher", prompt: "You are a crypto market researcher focused on fundamental analysis, news impact, and market sentiment. Analyze market trends, regulatory developments, and provide insights on how they affect cryptocurrency prices." },
-                    { label: "Risk Manager", prompt: "You are a trading risk management specialist. Focus on position sizing, stop-loss strategies, portfolio diversification, and risk-reward ratios. Always prioritize capital preservation and sustainable trading practices." },
+                    { label: "Trading Expert", prompt: DEFAULT_SYSTEM, checked: true },
+                    { label: "Technical Analyst", prompt: "You are a cryptocurrency technical analyst specializing in chart patterns, indicators, and price action. Provide detailed technical analysis with specific entry/exit points, support/resistance levels, and risk management advice.", checked: true },
+                    { label: "Market Researcher", prompt: "You are a crypto market researcher focused on fundamental analysis, news impact, and market sentiment. Analyze market trends, regulatory developments, and provide insights on how they affect cryptocurrency prices.", checked: true },
+                    { label: "Risk Manager", prompt: "You are a trading risk management specialist. Focus on position sizing, stop-loss strategies, portfolio diversification, and risk-reward ratios. Always prioritize capital preservation and sustainable trading practices.", checked: true },
                   ].map(p => (
-                    <button key={p.label} className="btn-ghost" style={{ textAlign: "left", marginBottom: 4, width: "100%" }}
-                      onClick={() => setSystemPrompt(p.prompt)}>
-                      {p.label}
-                    </button>
+                    <div key={p.label} style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "8px 10px", borderRadius: 4,
+                      background: "#0d0d1e", border: "1px solid #1a1a2e",
+                      marginBottom: 6, cursor: "pointer",
+                    }}
+                    onClick={() => setSystemPrompt(p.prompt)}>
+                      <input type="checkbox" defaultChecked={p.checked} style={{ accentColor: "#00ff9f" }} />
+                      <span style={{ fontSize: 12, color: "#888", flex: 1 }}>{p.label}</span>
+                    </div>
                   ))}
+                  
+                  <button className="btn-primary" style={{ width: "100%", padding: "10px" }}
+                    onClick={() => {
+                      // Save settings to localStorage
+                      localStorage.setItem('llm-settings', JSON.stringify({
+                        model,
+                        temperature,
+                        maxTokens,
+                        systemPrompt,
+                      }));
+                      // Show brief confirmation
+                      const btn = document.activeElement as HTMLButtonElement;
+                      if (btn) {
+                        const orig = btn.textContent;
+                        btn.textContent = '✅ SAVED!';
+                        setTimeout(() => { btn.textContent = orig; }, 1500);
+                      }
+                    }}
+                  >
+                    💾 SAVE SETTINGS
+                  </button>
                 </div>
               )}
             </div>
 
             {/* Bottom status */}
-            <div style={{ padding: "12px 16px", borderTop: "1px solid #1a1a2e", fontSize: 10, color: "#333" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#00ff9f" }} />
-                <span>OLLAMA CONNECTED · v1.0</span>
+            <div style={{ padding: "8px 12px", borderTop: "1px solid #1a1a2e", fontSize: 10, color: "#444" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <div style={{ width: 4, height: 4, borderRadius: "50%", background: "#00ff9f" }} />
+                <span>OLLAMA</span>
               </div>
             </div>
           </div>

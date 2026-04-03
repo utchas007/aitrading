@@ -20,6 +20,8 @@ export interface Position {
   stopLoss: number;
   takeProfit: number;
   currentPrice: number;
+  entryTime?: number; // Timestamp when position was opened
+  highestPrice?: number; // Track highest price reached (for trailing)
 }
 
 export interface PortfolioState {
@@ -146,25 +148,91 @@ export class RiskManager {
   }
 
   /**
-   * Check if position should be closed (stop loss or take profit hit)
+   * Check if position should be closed with dynamic profit taking
+   * Features:
+   * - Partial profit taking at 50% of target if price reverses
+   * - Time-based exits if position is open too long
+   * - Trailing stop to lock in profits
    */
   shouldClosePosition(position: Position): {
     shouldClose: boolean;
-    reason?: 'stop-loss' | 'take-profit';
+    reason?: 'stop-loss' | 'take-profit' | 'partial-profit' | 'time-exit' | 'trailing-stop';
+    partialClose?: boolean; // If true, close 50% of position
   } {
+    const now = Date.now();
+    const entryTime = position.entryTime || now;
+    const timeInPosition = now - entryTime; // milliseconds
+    const hoursInPosition = timeInPosition / (1000 * 60 * 60);
+    
+    // Track highest price for trailing stop
+    const highestPrice = position.highestPrice || position.entryPrice;
+    
     if (position.type === 'buy') {
+      // Standard stop loss
       if (position.currentPrice <= position.stopLoss) {
         return { shouldClose: true, reason: 'stop-loss' };
       }
+      
+      // Full take profit at target
       if (position.currentPrice >= position.takeProfit) {
         return { shouldClose: true, reason: 'take-profit' };
       }
+      
+      // Calculate profit percentage
+      const profitPercent = ((position.currentPrice - position.entryPrice) / position.entryPrice) * 100;
+      const targetProfitPercent = ((position.takeProfit - position.entryPrice) / position.entryPrice) * 100;
+      
+      // Partial profit taking: If reached 66% of target and price is reversing
+      if (profitPercent >= targetProfitPercent * 0.66) {
+        // Check if price dropped from highest by 5%
+        const dropFromHigh = ((highestPrice - position.currentPrice) / highestPrice) * 100;
+        if (dropFromHigh >= 5) {
+          return { shouldClose: true, reason: 'partial-profit', partialClose: true };
+        }
+      }
+      
+      // Time-based exit: If position open > 24 hours and profitable
+      if (hoursInPosition >= 24 && profitPercent > 5) {
+        return { shouldClose: true, reason: 'time-exit', partialClose: profitPercent < targetProfitPercent };
+      }
+      
+      // Trailing stop: If profit > 15%, set trailing stop at 10% below highest
+      if (profitPercent >= 15) {
+        const trailingStopPrice = highestPrice * 0.90; // 10% below highest
+        if (position.currentPrice <= trailingStopPrice) {
+          return { shouldClose: true, reason: 'trailing-stop' };
+        }
+      }
+      
     } else {
+      // SELL position logic (inverse)
       if (position.currentPrice >= position.stopLoss) {
         return { shouldClose: true, reason: 'stop-loss' };
       }
+      
       if (position.currentPrice <= position.takeProfit) {
         return { shouldClose: true, reason: 'take-profit' };
+      }
+      
+      const profitPercent = ((position.entryPrice - position.currentPrice) / position.entryPrice) * 100;
+      const targetProfitPercent = ((position.entryPrice - position.takeProfit) / position.entryPrice) * 100;
+      
+      if (profitPercent >= targetProfitPercent * 0.66) {
+        const riseFromLow = ((position.currentPrice - highestPrice) / highestPrice) * 100;
+        if (riseFromLow >= 5) {
+          return { shouldClose: true, reason: 'partial-profit', partialClose: true };
+        }
+      }
+      
+      if (hoursInPosition >= 24 && profitPercent > 5) {
+        return { shouldClose: true, reason: 'time-exit', partialClose: profitPercent < targetProfitPercent };
+      }
+      
+      if (profitPercent >= 15) {
+        const trailingStopPrice = highestPrice * 1.10;
+        if (position.currentPrice >= trailingStopPrice) {
+          return { shouldClose: true, reason: 'trailing-stop' };
+        }
       }
     }
 

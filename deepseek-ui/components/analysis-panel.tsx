@@ -23,6 +23,7 @@ export default function AnalysisPanel() {
   const [latestAnalysis, setLatestAnalysis] = useState<AnalysisData | null>(null);
   const [analysisHistory, setAnalysisHistory] = useState<AnalysisData[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
+  const [tradingMode, setTradingMode] = useState<{ autoExecute: boolean; isRunning: boolean } | null>(null);
 
   // Fetch bot activities and parse for analysis data
   useEffect(() => {
@@ -31,50 +32,68 @@ export default function AnalysisPanel() {
         const res = await fetch('/api/trading/engine');
         const data = await res.json();
         
-        if (data.success && data.activities) {
-          setActivities(data.activities);
+        if (data.success) {
+          // Update trading mode status
+          if (data.status && data.status.config) {
+            setTradingMode({
+              autoExecute: data.status.config.autoExecute,
+              isRunning: data.status.isRunning
+            });
+          }
           
-          // Parse activities to extract analysis data
-          const analyses: AnalysisData[] = [];
-          let currentAnalysis: Partial<AnalysisData> = {};
-          
-          data.activities.forEach((activity: Activity) => {
+          if (data.activities) {
+            setActivities(data.activities);
+            
+            // Parse activities to extract analysis data
+            const analyses: AnalysisData[] = [];
+            let currentAnalysis: Partial<AnalysisData> = {};
+            
+            data.activities.forEach((activity: Activity) => {
             const msg = activity.message;
             
-            // Extract pair being analyzed (support both USD and CAD pairs)
-            if (msg.includes('Analyzing') || msg.includes('XXBTZCAD') || msg.includes('USD')) {
-              const pairMatch = msg.match(/(XX[A-Z]+CAD|XX[A-Z]+USD|X[A-Z]+USD)/);
-              if (pairMatch) {
-                currentAnalysis = { pair: pairMatch[1], timestamp: activity.timestamp };
+            // Extract pair being analyzed (stocks like AAPL, MSFT or crypto like XXBTZCAD)
+            if (msg.includes('Analyzing')) {
+              // Match stock symbols (AAPL, MSFT, etc.) or crypto pairs
+              const stockMatch = msg.match(/Analyzing\s+([A-Z]{1,5})/);
+              const cryptoMatch = msg.match(/(XX[A-Z]+CAD|XX[A-Z]+USD|X[A-Z]+USD)/);
+              const pair = stockMatch?.[1] || cryptoMatch?.[1];
+              if (pair) {
+                currentAnalysis = { pair, timestamp: activity.timestamp };
               }
             }
             
-            // Extract technical indicators
-            if (msg.includes('RSI') && msg.includes('MACD')) {
-              const rsiMatch = msg.match(/RSI\s+([\d.]+)/);
-              const macdMatch = msg.match(/MACD\s+(\w+)/);
-              const confMatch = msg.match(/Confidence\s+(\d+)%/);
-              
-              if (rsiMatch) currentAnalysis.rsi = parseFloat(rsiMatch[1]);
-              if (macdMatch) currentAnalysis.macd = macdMatch[1];
-              if (confMatch) currentAnalysis.confidence = parseInt(confMatch[1]);
+            // Extract technical indicators (format: "AAPL: RSI 49.4, MACD bullish, Confidence 59%")
+            if (msg.includes('RSI') && msg.includes('MACD') && msg.includes('Confidence')) {
+              const techMatch = msg.match(/([A-Z]{1,5}):\s*RSI\s+([\d.]+),\s*MACD\s+(\w+),\s*Confidence\s+(\d+)%/);
+              if (techMatch) {
+                const [, pair, rsi, macd, conf] = techMatch;
+                // Store for later use or update existing
+                if (!currentAnalysis.pair) currentAnalysis.pair = pair;
+                currentAnalysis.rsi = parseFloat(rsi);
+                currentAnalysis.macd = macd;
+                currentAnalysis.confidence = parseInt(conf);
+                currentAnalysis.timestamp = activity.timestamp;
+              }
             }
             
-            // Extract signal and reasoning
-            if (msg.includes('BUY') || msg.includes('SELL') || msg.includes('HOLD')) {
-              const actionMatch = msg.match(/(BUY|SELL|HOLD)/);
-              if (actionMatch) {
-                currentAnalysis.action = actionMatch[1];
+            // Extract signal and reasoning (format: "AAPL: HOLD | Confidence: 59% | reasoning")
+            if (msg.includes(': HOLD') || msg.includes(': BUY') || msg.includes(': SELL')) {
+              const signalMatch = msg.match(/([A-Z]{1,5}):\s*(BUY|SELL|HOLD)\s*\|\s*Confidence:\s*(\d+)%/);
+              if (signalMatch) {
+                const [, pair, action, confidence] = signalMatch;
+                currentAnalysis.pair = pair;
+                currentAnalysis.action = action;
+                currentAnalysis.confidence = parseInt(confidence);
                 
                 // Extract reasoning from message
                 const parts = msg.split('|');
                 if (parts.length > 2) {
-                  currentAnalysis.reasoning = parts[parts.length - 1].trim();
+                  currentAnalysis.reasoning = parts.slice(2).join('|').trim();
                 } else {
                   currentAnalysis.reasoning = msg;
                 }
                 
-                // Complete analysis if we have pair and action
+                // Complete analysis - push it
                 if (currentAnalysis.pair && currentAnalysis.action) {
                   analyses.push(currentAnalysis as AnalysisData);
                   currentAnalysis = {};
@@ -86,6 +105,7 @@ export default function AnalysisPanel() {
           if (analyses.length > 0) {
             setLatestAnalysis(analyses[0]);
             setAnalysisHistory(analyses.slice(0, 10));
+            }
           }
         }
       } catch (error) {
@@ -125,9 +145,50 @@ export default function AnalysisPanel() {
         padding: 20,
         height: '100%',
       }}>
-        <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', marginBottom: 16 }}>
-          AI Trading Analysis
-        </h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', margin: 0 }}>
+            AI Trading Analysis
+          </h2>
+          
+          {/* Trading Mode Indicator */}
+          {tradingMode && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '6px 12px',
+              background: tradingMode.autoExecute ? '#ff4d6d15' : '#ffd60a15',
+              border: `1px solid ${tradingMode.autoExecute ? '#ff4d6d44' : '#ffd60a44'}`,
+              borderRadius: 6,
+            }}>
+              <div style={{
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: tradingMode.autoExecute ? '#ff4d6d' : '#ffd60a',
+                boxShadow: `0 0 8px ${tradingMode.autoExecute ? '#ff4d6d' : '#ffd60a'}`,
+                animation: 'pulse 2s infinite',
+              }} />
+              <span style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: tradingMode.autoExecute ? '#ff4d6d' : '#ffd60a',
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
+              }}>
+                {tradingMode.autoExecute ? 'LIVE TRADING' : 'SAFE MODE'}
+              </span>
+            </div>
+          )}
+        </div>
+
+        <style>{`
+          @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+          }
+        `}</style>
+
         <div style={{ textAlign: 'center', padding: 60, color: '#666' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>📊</div>
           <div style={{ fontSize: 14 }}>Waiting for bot analysis...</div>
@@ -153,9 +214,49 @@ export default function AnalysisPanel() {
       display: 'flex',
       flexDirection: 'column',
     }}>
-      <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', marginBottom: 16 }}>
-        AI Trading Analysis
-      </h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', margin: 0 }}>
+          AI Trading Analysis
+        </h2>
+        
+        {/* Trading Mode Indicator */}
+        {tradingMode && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 12px',
+            background: tradingMode.autoExecute ? '#ff4d6d15' : '#ffd60a15',
+            border: `1px solid ${tradingMode.autoExecute ? '#ff4d6d44' : '#ffd60a44'}`,
+            borderRadius: 6,
+          }}>
+            <div style={{
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              background: tradingMode.autoExecute ? '#ff4d6d' : '#ffd60a',
+              boxShadow: `0 0 8px ${tradingMode.autoExecute ? '#ff4d6d' : '#ffd60a'}`,
+              animation: 'pulse 2s infinite',
+            }} />
+            <span style={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: tradingMode.autoExecute ? '#ff4d6d' : '#ffd60a',
+              letterSpacing: '0.05em',
+              textTransform: 'uppercase',
+            }}>
+              {tradingMode.autoExecute ? 'LIVE TRADING' : 'SAFE MODE'}
+            </span>
+          </div>
+        )}
+      </div>
+
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+      `}</style>
 
       {/* Latest Analysis */}
       <div style={{
@@ -225,12 +326,26 @@ export default function AnalysisPanel() {
         <div style={{ fontSize: 12, color: '#666', marginBottom: 12 }}>RECENT ANALYSES</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {analysisHistory.slice(1).map((analysis, idx) => (
-            <div key={idx} style={{
-              background: '#0d0d1e',
-              border: '1px solid #1a1a2e',
-              borderRadius: 6,
-              padding: 12,
-            }}>
+            <div 
+              key={idx} 
+              style={{
+                background: '#0d0d1e',
+                border: '1px solid #1a1a2e',
+                borderRadius: 6,
+                padding: 12,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+              }}
+              onClick={() => setLatestAnalysis(analysis)}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = '#00ff9f';
+                e.currentTarget.style.background = '#0f0f1f';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = '#1a1a2e';
+                e.currentTarget.style.background = '#0d0d1e';
+              }}
+            >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                 <span style={{ fontSize: 13, fontWeight: 600, color: '#fff' }}>{analysis.pair}</span>
                 <span style={{ fontSize: 13, fontWeight: 700, color: getSignalColor(analysis.action) }}>

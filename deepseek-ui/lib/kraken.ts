@@ -119,6 +119,22 @@ export class KrakenAPI {
   }
 
   /**
+   * Get trade balance and total portfolio value (private)
+   */
+  async getTradeBalance(): Promise<{
+    eb: string; // equivalent balance (combined balance of all currencies)
+    tb: string; // trade balance (combined balance of all equity currencies)
+    m: string; // margin amount of open positions
+    n: string; // unrealized net profit/loss of open positions
+    c: string; // cost basis of open positions
+    v: string; // current floating valuation of open positions
+    e: string; // equity = trade balance + unrealized net profit/loss
+    mf: string; // free margin = equity - initial margin (maximum margin available to open new positions)
+  }> {
+    return await this.privateRequest('TradeBalance', { asset: 'ZCAD' });
+  }
+
+  /**
    * Get open orders (private)
    */
   async getOpenOrders(): Promise<{ open: { [txid: string]: any } }> {
@@ -143,7 +159,25 @@ export class KrakenAPI {
     price?: string;
     validate?: boolean;
   }): Promise<{ descr: { order: string }; txid: string[] }> {
-    return await this.privateRequest('AddOrder', params);
+    // For market orders, don't send price parameter at all
+    const orderParams: any = {
+      pair: params.pair,
+      type: params.type,
+      ordertype: params.ordertype,
+      volume: params.volume,
+    };
+    
+    // Only add price for limit orders
+    if (params.ordertype === 'limit' && params.price) {
+      orderParams.price = params.price;
+    }
+    
+    // Add validate flag if present
+    if (params.validate !== undefined) {
+      orderParams.validate = params.validate;
+    }
+    
+    return await this.privateRequest('AddOrder', orderParams);
   }
 
   /**

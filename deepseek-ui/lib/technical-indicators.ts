@@ -265,38 +265,43 @@ export function analyzeTechnicalIndicators(priceData: PriceData[]): TechnicalSig
 }
 
 /**
- * Get historical price data from Kraken
+ * Get historical price data from Interactive Brokers (via ib_service.py)
  */
 export async function getHistoricalPrices(
-  pair: string,
-  interval: number = 5,
-  since?: number
+  symbol: string,
+  interval: number = 5,  // minutes
 ): Promise<PriceData[]> {
+  // Map interval (minutes) to IB bar size + duration that yields 100+ bars
+  let barSize: string;
+  let duration: string;
+  if (interval <= 1)        { barSize = '1 min';   duration = '1 D'; }
+  else if (interval <= 5)   { barSize = '5 mins';  duration = '3 D'; }
+  else if (interval <= 15)  { barSize = '15 mins'; duration = '5 D'; }
+  else if (interval <= 60)  { barSize = '1 hour';  duration = '10 D'; }
+  else                      { barSize = '1 day';   duration = '3 M'; }
+
+  // Use the OHLC API route which has Yahoo Finance fallback built in
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3001';
+  const params = new URLSearchParams({ symbol, barSize, duration });
+
   try {
-    const params = new URLSearchParams({
-      pair,
-      interval: interval.toString(),
+    const response = await fetch(`${baseUrl}/api/ib/ohlc?${params}`, {
+      signal: AbortSignal.timeout(20000),
     });
-    if (since) params.append('since', since.toString());
+    if (!response.ok) throw new Error(`OHLC route ${response.status}`);
+    const data: { success: boolean; bars: { time: string; open: number; high: number; low: number; close: number; volume: number }[] } = await response.json();
+    if (!data.success || !data.bars?.length) throw new Error('No bars returned');
 
-    const response = await fetch(`https://api.kraken.com/0/public/OHLC?${params}`);
-    const data = await response.json();
-
-    if (data.error && data.error.length > 0) {
-      throw new Error(`Kraken API error: ${data.error.join(', ')}`);
-    }
-
-    const ohlcData = data.result[pair];
-    return ohlcData.map((candle: any[]) => ({
-      timestamp: candle[0] * 1000,
-      open: parseFloat(candle[1]),
-      high: parseFloat(candle[2]),
-      low: parseFloat(candle[3]),
-      close: parseFloat(candle[4]),
-      volume: parseFloat(candle[6]),
+    return data.bars.map(bar => ({
+      timestamp: new Date(bar.time).getTime(),
+      open:   bar.open,
+      high:   bar.high,
+      low:    bar.low,
+      close:  bar.close,
+      volume: bar.volume,
     }));
   } catch (error) {
-    console.error('Failed to fetch historical prices:', error);
+    console.error(`Failed to fetch historical prices for ${symbol}:`, error);
     return [];
   }
 }

@@ -1,21 +1,88 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createKrakenClient } from '@/lib/kraken';
+import { createIBClient } from '@/lib/ib-client';
+import { getHistoricalPrices, analyzeTechnicalIndicators } from '@/lib/technical-indicators';
+import { getMarketContextForAI } from '@/lib/worldmonitor-data';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, model = 'deepseek-r1:14b', temperature = 0.7, max_tokens = 1000, system } = await req.json();
+    const { messages, model = 'deepseek-r1:14b', temperature = 0.7, max_tokens = 6000, system } = await req.json();
 
     if (!messages || messages.length === 0) {
       return NextResponse.json({ error: 'Messages are required' }, { status: 400 });
     }
 
-    // Build the prompt from messages
+    // Fetch real-time market data
+    const t0 = Date.now();
+    const marketContext = await fetchMarketContext();
+    console.log(`[CHAT] Data fetch took ${Date.now() - t0}ms`);
+
+    // Build time context so AI knows current date, time, and market session
+    const now = new Date();
+    const etNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const etHour = etNow.getHours();
+    const etMin  = etNow.getMinutes();
+    const etDay  = etNow.getDay();
+    const isWeekend = etDay === 0 || etDay === 6;
+    const isPreMarket    = !isWeekend && etHour >= 4  && (etHour < 9  || (etHour === 9  && etMin < 30));
+    const isRegularHours = !isWeekend && (etHour > 9 || (etHour === 9 && etMin >= 30)) && etHour < 16;
+    const isAfterHours   = !isWeekend && etHour >= 16 && etHour < 20;
+    const marketSession  = isWeekend ? 'Weekend (market closed)'
+      : isPreMarket    ? 'Pre-market (4:00–9:30 AM ET)'
+      : isRegularHours ? 'Regular hours (9:30 AM–4:00 PM ET)'
+      : isAfterHours   ? 'After-hours (4:00–8:00 PM ET)'
+      : 'Market closed';
+    const timeContext = `CURRENT TIME & MARKET SESSION:
+Date/Time (UTC): ${now.toUTCString()}
+Eastern Time: ${etNow.toLocaleString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit', timeZoneName:'short', timeZone:'America/New_York' })}
+Market Session: ${marketSession}
+US markets open: Monday–Friday 9:30 AM–4:00 PM ET\n`;
+
+    // Build the prompt from messages with live market data
     let prompt = '';
     if (system) {
       prompt += `System: ${system}\n\n`;
     }
+
+    // Define AI capabilities so it knows what data sources it's connected to
+    const capabilitiesContext = `
+=== YOUR DATA CONNECTIONS & CAPABILITIES ===
+You are connected to the following LIVE data sources:
+
+1. INTERACTIVE BROKERS (IB) - Stock trading broker
+   - Real-time stock prices for watchlist (AAPL, MSFT, NVDA, TSLA, GOOGL, AMZN, META, AMD)
+   - Account balance, buying power, open positions
+   - Order execution capability (paper trading)
+
+2. KRAKEN - Cryptocurrency exchange
+   - Live crypto prices (BTC, ETH, SOL in CAD)
+   - Portfolio balance and trade history
+   - Trading capability
+
+3. WORLD MONITOR - Global intelligence
+   - Real-time commodity prices (Oil, Gold, Silver, Natural Gas)
+   - Global market indices (S&P 500, Dow, NASDAQ, FTSE, DAX, Nikkei, Hang Seng)
+   - Geopolitical risk assessment and hotspots
+   - Breaking financial news from multiple sources
+
+4. YAHOO FINANCE - Fallback data source
+   - Stock prices when IB is unavailable
+   - Technical data
+
+5. AUTOMATED TRADING BOT
+   - Running analysis every 5 minutes
+   - Recent bot signals and activity
+   - Technical indicators (RSI, MACD, etc.)
+
+You have FULL visibility into all this data below. Use it to provide informed, specific answers.
+DO NOT say you don't have access to markets, finance, or tech - you absolutely do!
+===\n`;
+
+    // Inject capabilities + time + market context at the top
+    prompt += `${capabilitiesContext}\n${timeContext}\nCURRENT MARKET DATA:\n${marketContext}\n\n`;
     
     messages.forEach((msg: { role: string; content: string }) => {
       if (msg.role === 'user') {
@@ -65,5 +132,199 @@ export async function POST(req: NextRequest) {
       { error: error.message || 'Failed to generate response' },
       { status: 500 }
     );
+  }
+}
+
+// Key stocks to always include in context
+const WATCHLIST_STOCKS = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'];
+
+/**
+ * Fetch stock data from Interactive Brokers and compute technicals
+ */
+// Fetch with hard timeout — never blocks the chat
+async function fetchWithTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>(resolve => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+async function fetchStockContext(): Promise<string> {
+  try {
+    const ib = createIBClient();
+
+    // Hard 4s timeout on balance + positions — skip if IB is slow
+    const [ibBalance, positions] = await Promise.all([
+      fetchWithTimeout(ib.getBalance(), 4000, {} as any),
+      fetchWithTimeout(ib.getPositions(), 4000, []),
+    ]);
+
+    const netLiq = ibBalance['NetLiquidation_CAD'] ?? ibBalance['NetLiquidation_USD'] ?? '0';
+    const cash = ibBalance['TotalCashValue_CAD'] ?? ibBalance['TotalCashValue_USD'] ?? '0';
+    const buyingPower = ibBalance['BuyingPower_CAD'] ?? ibBalance['BuyingPower_USD'] ?? '0';
+    const unrealizedPnL = ibBalance['UnrealizedPnL_CAD'] ?? ibBalance['UnrealizedPnL_BASE'] ?? '0';
+
+    let context = `\n=== IB PAPER ACCOUNT ===\n`;
+    if (netLiq !== '0') {
+      context += `Net Liquidation: $${parseFloat(netLiq).toLocaleString()}\n`;
+      context += `Cash Available: $${parseFloat(cash).toLocaleString()}\n`;
+      context += `Buying Power: $${parseFloat(buyingPower).toLocaleString()}\n`;
+      context += `Unrealized P&L: $${parseFloat(unrealizedPnL).toFixed(2)}\n`;
+    } else {
+      context += `Balance data unavailable\n`;
+    }
+
+    if (positions.length > 0) {
+      context += `\nOpen Positions:\n`;
+      positions.forEach((p: any) => {
+        context += `  ${p.symbol}: ${p.position} shares @ avg $${p.avg_cost.toFixed(2)}\n`;
+      });
+    } else {
+      context += `Open Positions: None\n`;
+    }
+
+    // Use Yahoo Finance for quick prices — no OHLC, no technicals, just last price
+    // This is for chat context only — trading engine does the deep analysis
+    context += `\n=== STOCK PRICES (Yahoo Finance) ===\n`;
+    const priceResults = await Promise.allSettled(
+      WATCHLIST_STOCKS.map(async (symbol) => {
+        const res = await fetchWithTimeout(
+          fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=2d`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(3000),
+          }).then(r => r.json()),
+          3500,
+          null
+        );
+        const meta = res?.chart?.result?.[0]?.meta;
+        if (!meta) return null;
+        const price = meta.regularMarketPrice ?? 0;
+        const prev  = meta.chartPreviousClose ?? price;
+        const change = prev > 0 ? (((price - prev) / prev) * 100).toFixed(2) : '0.00';
+        return { symbol, price, change };
+      })
+    );
+
+    priceResults.forEach((result, i) => {
+      if (result.status === 'fulfilled' && result.value) {
+        const { symbol, price, change } = result.value;
+        const arrow = parseFloat(change) >= 0 ? '▲' : '▼';
+        context += `${symbol}: $${price.toFixed(2)} ${arrow}${change}%\n`;
+      } else {
+        context += `${WATCHLIST_STOCKS[i]}: unavailable\n`;
+      }
+    });
+
+    return context;
+  } catch (error) {
+    console.error('Failed to fetch IB stock context:', error);
+    return '\n=== IB STOCK DATA ===\nData temporarily unavailable.\n';
+  }
+}
+
+/**
+ * Fetch current market context for AI including crypto (Kraken), stocks (IB), and World Monitor geopolitical data
+ */
+async function fetchMarketContext(): Promise<string> {
+  // Run crypto, stock, and world monitor fetches in parallel
+  const [cryptoContext, stockContext, worldContext] = await Promise.allSettled([
+    fetchCryptoContext(),
+    fetchStockContext(),
+    fetchWithTimeout(getMarketContextForAI(), 8000, ''),
+  ]);
+
+  let context = '';
+  context += cryptoContext.status === 'fulfilled' ? cryptoContext.value : 'Crypto data unavailable.\n';
+  context += stockContext.status === 'fulfilled' ? stockContext.value : '\nStock data unavailable.\n';
+  
+  // Add World Monitor global data
+  const wmData = worldContext.status === 'fulfilled' ? worldContext.value : '';
+  if (wmData) {
+    context += '\n' + wmData;
+  }
+  
+  return context;
+}
+
+/**
+ * Fetch crypto context from Kraken + news + geopolitical data
+ */
+async function fetchCryptoContext(): Promise<string> {
+  try {
+    const kraken = createKrakenClient();
+    
+    // Parallel fetch with hard 4s timeout each — never block chat
+    const [balance, tradeBalance, ticker, newsData, engineData, wmData] = await Promise.all([
+      fetchWithTimeout(kraken.getBalance(), 4000, {}),
+      fetchWithTimeout(kraken.getTradeBalance(), 4000, { eb: '0', tb: '0', m: '0', n: '0', c: '0', v: '0', e: '0', mf: '0' }),
+      fetchWithTimeout(kraken.getTicker(['XXBTZCAD', 'XETHZCAD', 'SOLCAD']), 4000, {}),
+      fetchWithTimeout(
+        fetch('http://localhost:3001/api/worldmonitor/news?category=markets&limit=5', { signal: AbortSignal.timeout(3000) })
+          .then(r => r.json()).catch(() => ({ success: false })),
+        4000, { success: false }
+      ),
+      fetchWithTimeout(
+        fetch('http://localhost:3001/api/trading/engine', { signal: AbortSignal.timeout(3000) })
+          .then(r => r.json()).catch(() => ({ success: false })),
+        4000, { success: false }
+      ),
+      fetchWithTimeout(
+        fetch('http://localhost:3000/api/conflict/v1/worldmonitor.conflict.v1.ConflictService/ListConflicts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ limit: 5 }),
+          signal: AbortSignal.timeout(3000),
+        }).then(r => r.json()).catch(() => ({})),
+        4000, {}
+      ),
+    ]);
+
+    const news = newsData.success ? newsData.news : [];
+    const latestActivity = engineData.success ? engineData.activities?.slice(0, 3) : [];
+    
+    // Build World Monitor geopolitical context
+    let worldMonitorData = '';
+    if (wmData.conflicts && wmData.conflicts.length > 0) {
+      worldMonitorData = `\n=== GEOPOLITICAL EVENTS (World Monitor) ===\n`;
+      wmData.conflicts.slice(0, 3).forEach((conflict: any, i: number) => {
+        worldMonitorData += `${i + 1}. ${conflict.name || 'Conflict'} - ${conflict.status || 'Active'}\n`;
+      });
+    }
+    
+    // Build context string with portfolio information
+    let context = `=== CRYPTO PORTFOLIO (Kraken) — ${new Date().toLocaleString()} ===\n`;
+    context += `Total Value: $${parseFloat(tradeBalance.eb).toFixed(2)} CAD\n`;
+    context += `Equity: $${parseFloat(tradeBalance.e).toFixed(2)} CAD\n`;
+    context += `\nCrypto Holdings:\n`;
+    Object.entries(balance).forEach(([currency, amount]) => {
+      const value = parseFloat(amount as string);
+      if (value > 0.0001) {
+        context += `  ${currency}: ${value.toFixed(8)}\n`;
+      }
+    });
+    
+    context += `\n=== LIVE CRYPTO PRICES ===\n`;
+    Object.entries(ticker).forEach(([pair, data]) => {
+      context += `${pair}: $${parseFloat(data.c[0]).toLocaleString()} (24h Vol: ${parseFloat(data.v[1]).toFixed(2)})\n`;
+    });
+    
+    context += `\n=== LATEST FINANCIAL NEWS ===\n`;
+    news.slice(0, 3).forEach((item: any, i: number) => {
+      context += `${i + 1}. ${item.title} (${item.source}, ${new Date(item.pubDate).toLocaleTimeString()})\n`;
+    });
+    
+    if (worldMonitorData) {
+      context += worldMonitorData;
+    }
+    
+    context += `\n=== BOT'S RECENT ANALYSIS ===\n`;
+    latestActivity.forEach((activity: any) => {
+      context += `- ${activity.message}\n`;
+    });
+    
+    return context;
+  } catch (error) {
+    console.error('Failed to fetch crypto market context:', error);
+    return 'Crypto market data temporarily unavailable.';
   }
 }
