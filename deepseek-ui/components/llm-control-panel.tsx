@@ -53,7 +53,8 @@ export default function LLMControlPanel() {
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM);
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(1000);
-  const [messages, setMessages] = useState<Array<{ role: string; content: string; ts: Date; tokens?: number; error?: boolean }>>([]);
+  const [messages, setMessages] = useState<Array<{ role: string; content: string; ts: Date; tokens?: number; error?: boolean; streaming?: boolean }>>([]);
+  const [streamingText, setStreamingText] = useState('');
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [totalTokens, setTotalTokens] = useState(0);
@@ -176,11 +177,13 @@ export default function LLMControlPanel() {
     setMessages(newMessages);
     setInput("");
     setLoading(true);
+    setStreamingText('');
     // Save user message to DB
     saveMessageToDb('user', input.trim());
 
     try {
-      const res = await fetch("/api/chat", {
+      // Use streaming API
+      const res = await fetch("/api/chat?stream=true", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -191,22 +194,94 @@ export default function LLMControlPanel() {
           messages: newMessages.map(m => ({ role: m.role, content: m.content })),
         }),
       });
-      const data = await res.json();
-      
-      if (data.error) {
-        throw new Error(data.error);
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to get response');
       }
-      
-      const assistantText = data.response || "No response.";
-      const tokensUsed = data.tokens || 0;
-      setTotalTokens(t => t + tokensUsed);
-      setMessages(prev => [...prev, { role: "assistant", content: assistantText, ts: new Date(), tokens: tokensUsed }]);
-      // Save to DB
-      saveMessageToDb('assistant', assistantText, tokensUsed, false);
+
+      // Check if streaming response
+      const contentType = res.headers.get('content-type');
+      if (contentType?.includes('text/event-stream')) {
+        // Streaming response - read chunks
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        let fullText = '';
+
+        // Add placeholder message for streaming
+        setMessages(prev => [...prev, { role: "assistant", content: '', ts: new Date(), streaming: true }]);
+
+        while (reader) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n').filter(line => line.startsWith('data: '));
+
+          for (const line of lines) {
+            try {
+              const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
+              if (data.token) {
+                fullText += data.token;
+                setStreamingText(fullText);
+                // Update the last message with streaming content
+                setMessages(prev => {
+                  const updated = [...prev];
+                  if (updated.length > 0 && updated[updated.length - 1].streaming) {
+                    updated[updated.length - 1].content = fullText;
+                  }
+                  return updated;
+                });
+              }
+              if (data.done) {
+                // Finalize message
+                const tokensUsed = Math.ceil(fullText.length / 4);
+                setTotalTokens(t => t + tokensUsed);
+                setMessages(prev => {
+                  const updated = [...prev];
+                  if (updated.length > 0) {
+                    updated[updated.length - 1] = {
+                      ...updated[updated.length - 1],
+                      content: fullText,
+                      tokens: tokensUsed,
+                      streaming: false,
+                    };
+                  }
+                  return updated;
+                });
+                // Save to DB
+                saveMessageToDb('assistant', fullText, tokensUsed, false);
+              }
+            } catch (e) {
+              // Skip malformed JSON
+            }
+          }
+        }
+      } else {
+        // Non-streaming fallback
+        const data = await res.json();
+        
+        if (data.error) {
+          throw new Error(data.error);
+        }
+        
+        const assistantText = data.response || "No response.";
+        const tokensUsed = data.tokens || 0;
+        setTotalTokens(t => t + tokensUsed);
+        setMessages(prev => [...prev, { role: "assistant", content: assistantText, ts: new Date(), tokens: tokensUsed }]);
+        // Save to DB
+        saveMessageToDb('assistant', assistantText, tokensUsed, false);
+      }
     } catch (e: any) {
-      setMessages(prev => [...prev, { role: "assistant", content: `⚠ Error: ${e.message}`, ts: new Date(), error: true }]);
+      console.error('Chat error:', e);
+      setMessages(prev => {
+        // Remove streaming placeholder if exists
+        const filtered = prev.filter(m => !m.streaming);
+        return [...filtered, { role: "assistant", content: `⚠ Error: ${e.message}`, ts: new Date(), error: true }];
+      });
     }
     setLoading(false);
+    setStreamingText('');
   }, [input, loading, messages, model, maxTokens, systemPrompt, temperature]);
 
   const handleKey = (e: React.KeyboardEvent) => {
@@ -242,6 +317,7 @@ export default function LLMControlPanel() {
         ::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 2px; }
         @keyframes pulse { 0%,100%{opacity:0.3;transform:scale(0.8)} 50%{opacity:1;transform:scale(1)} }
         @keyframes fadeUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
         .msg-enter { animation: fadeUp 0.25s ease forwards; }
         .btn-primary {
           background: linear-gradient(135deg, #00ff9f22, #0066ff22);
@@ -366,8 +442,19 @@ export default function LLMControlPanel() {
                     color: msg.error ? "#ff4d6d" : "#c8d0e0",
                     whiteSpace: "pre-wrap",
                     wordBreak: "break-word",
+                    position: "relative",
                   }}>
                     {msg.content}
+                    {msg.streaming && (
+                      <span style={{ 
+                        display: "inline-block", 
+                        width: 8, 
+                        height: 16, 
+                        background: "#00ff9f", 
+                        marginLeft: 2,
+                        animation: "blink 1s infinite",
+                      }} />
+                    )}
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 10, color: "#333" }}>
                     <span>{msg.ts.toLocaleTimeString()}</span>

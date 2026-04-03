@@ -6,6 +6,7 @@ import { getMarketContextForAI } from '@/lib/worldmonitor-data';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 120; // Allow up to 2 minutes for AI response
 
 export async function POST(req: NextRequest) {
   try {
@@ -94,6 +95,10 @@ DO NOT say you don't have access to markets, finance, or tech - you absolutely d
     
     prompt += 'Assistant: ';
 
+    // Check if streaming is requested
+    const url = new URL(req.url);
+    const useStreaming = url.searchParams.get('stream') === 'true';
+
     // Connect to local Ollama instance
     const response = await fetch('http://localhost:11434/api/generate', {
       method: 'POST',
@@ -103,7 +108,7 @@ DO NOT say you don't have access to markets, finance, or tech - you absolutely d
       body: JSON.stringify({
         model: model,
         prompt: prompt,
-        stream: false,
+        stream: useStreaming,
         options: {
           temperature: temperature,
           num_predict: max_tokens,
@@ -115,6 +120,55 @@ DO NOT say you don't have access to markets, finance, or tech - you absolutely d
       throw new Error(`Ollama API error: ${response.statusText}`);
     }
 
+    // If streaming, return a ReadableStream
+    if (useStreaming && response.body) {
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      
+      const stream = new ReadableStream({
+        async start(controller) {
+          const reader = response.body!.getReader();
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              
+              const chunk = decoder.decode(value, { stream: true });
+              // Ollama returns newline-delimited JSON
+              const lines = chunk.split('\n').filter(line => line.trim());
+              
+              for (const line of lines) {
+                try {
+                  const json = JSON.parse(line);
+                  if (json.response) {
+                    // Send just the text token
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ token: json.response, done: json.done })}\n\n`));
+                  }
+                  if (json.done) {
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
+                  }
+                } catch (e) {
+                  // Skip malformed JSON
+                }
+              }
+            }
+          } finally {
+            reader.releaseLock();
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
+    // Non-streaming response
     const data = await response.json();
 
     // Estimate tokens (rough approximation: 1 token ≈ 4 characters)
