@@ -17,6 +17,56 @@ async function persistToDb(type: string, message: string, pair?: string): Promis
   }
 }
 
+// Load recent activities from database
+async function loadFromDb(limit: number = 50): Promise<Activity[]> {
+  try {
+    const { prisma } = await import('./db');
+    const dbActivities = await prisma.activityLog.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+    return dbActivities.map((a: any) => ({
+      id: String(a.id),
+      timestamp: new Date(a.createdAt).getTime(),
+      type: a.type as ActivityType,
+      message: a.message,
+      icon: getIconForType(a.type as ActivityType),
+      color: getColorForType(a.type as ActivityType),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// Helper functions for icon/color (used by both class and loadFromDb)
+function getIconForType(type: ActivityType): string {
+  const icons: Record<ActivityType, string> = {
+    searching: '🔍',
+    analyzing: '📊',
+    calculating: '🧮',
+    executing: '⚡',
+    completed: '✅',
+    error: '❌',
+    info: 'ℹ️',
+    warning: '⚠️',
+  };
+  return icons[type] || 'ℹ️';
+}
+
+function getColorForType(type: ActivityType): string {
+  const colors: Record<ActivityType, string> = {
+    searching: '#00ff9f',
+    analyzing: '#0066ff',
+    calculating: '#ffd60a',
+    executing: '#ff4d6d',
+    completed: '#00ff9f',
+    error: '#ff4d6d',
+    info: '#888',
+    warning: '#ffd60a',
+  };
+  return colors[type] || '#888';
+}
+
 export type ActivityType = 
   | 'searching'
   | 'analyzing'
@@ -40,6 +90,27 @@ export class ActivityLogger {
   private activities: Activity[] = [];
   private maxActivities: number = 100;
   private listeners: Set<(activity: Activity) => void> = new Set();
+  private dbLoaded: boolean = false;
+
+  /**
+   * Load activities from database (call once on init)
+   */
+  async loadFromDatabase(): Promise<void> {
+    if (this.dbLoaded) return;
+    const dbActivities = await loadFromDb(this.maxActivities);
+    // Merge with in-memory (in-memory takes priority for recent)
+    const existingIds = new Set(this.activities.map(a => a.id));
+    for (const act of dbActivities) {
+      if (!existingIds.has(act.id)) {
+        this.activities.push(act);
+      }
+    }
+    // Sort by timestamp descending
+    this.activities.sort((a, b) => b.timestamp - a.timestamp);
+    // Trim to max
+    this.activities = this.activities.slice(0, this.maxActivities);
+    this.dbLoaded = true;
+  }
 
   /**
    * Log an activity
@@ -98,34 +169,14 @@ export class ActivityLogger {
    * Get icon for activity type
    */
   private getIcon(type: ActivityType): string {
-    const icons: Record<ActivityType, string> = {
-      searching: '🔍',
-      analyzing: '📊',
-      calculating: '🧮',
-      executing: '⚡',
-      completed: '✅',
-      error: '❌',
-      info: 'ℹ️',
-      warning: '⚠️',
-    };
-    return icons[type];
+    return getIconForType(type);
   }
 
   /**
    * Get color for activity type
    */
   private getColor(type: ActivityType): string {
-    const colors: Record<ActivityType, string> = {
-      searching: '#00ff9f',
-      analyzing: '#0066ff',
-      calculating: '#ffd60a',
-      executing: '#ff4d6d',
-      completed: '#00ff9f',
-      error: '#ff4d6d',
-      info: '#888',
-      warning: '#ffd60a',
-    };
-    return colors[type];
+    return getColorForType(type);
   }
 }
 

@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -9,53 +6,47 @@ datasource db {
   provider = "postgresql"
 }
 
-// ─── Trading Signals ────────────────────────────────────────────────────────
 model TradingSignal {
-  id              Int      @id @default(autoincrement())
-  createdAt       DateTime @default(now())
-  pair            String
-  action          String   // buy | sell | hold
-  confidence      Float
-  entryPrice      Float
-  stopLoss        Float
-  takeProfit      Float
-  positionSize    Float
-  reasoning       String   @db.Text
-  // Technical indicators snapshot
-  rsi             Float?
-  rsiSignal       String?
-  macdTrend       String?
-  bbPosition      String?
-  emaTrend        String?
-  volumeSpike     Boolean?
-  // Enhanced indicators
-  stochRsiK       Float?
-  stochRsiD       Float?
-  stochRsiSignal  String?
-  atrPercent      Float?
-  obvTrend        String?
-  ichimokuSignal  String?
-  volatilityLevel String?
-  // Sentiment
-  fearGreedValue  Int?
-  fearGreedClass  String?
-  redditSentiment Float?
+  id               Int      @id @default(autoincrement())
+  createdAt        DateTime @default(now())
+  pair             String
+  action           String
+  confidence       Float
+  entryPrice       Float
+  stopLoss         Float
+  takeProfit       Float
+  positionSize     Float
+  reasoning        String
+  rsi              Float?
+  rsiSignal        String?
+  macdTrend        String?
+  bbPosition       String?
+  emaTrend         String?
+  volumeSpike      Boolean?
+  stochRsiK        Float?
+  stochRsiD        Float?
+  stochRsiSignal   String?
+  atrPercent       Float?
+  obvTrend         String?
+  ichimokuSignal   String?
+  volatilityLevel  String?
+  fearGreedValue   Int?
+  fearGreedClass   String?
+  redditSentiment  Float?
   overallSentiment String?
-  // Execution
-  executed        Boolean  @default(false)
-  txid            String?
+  executed         Boolean  @default(false)
+  txid             String?
 
   @@index([pair, createdAt])
   @@index([createdAt])
 }
 
-// ─── Executed Trades ────────────────────────────────────────────────────────
 model Trade {
-  id          Int      @id @default(autoincrement())
-  createdAt   DateTime @default(now())
+  id          Int       @id @default(autoincrement())
+  createdAt   DateTime  @default(now())
   closedAt    DateTime?
   pair        String
-  type        String   // buy | sell
+  type        String
   entryPrice  Float
   exitPrice   Float?
   volume      Float
@@ -63,76 +54,71 @@ model Trade {
   takeProfit  Float
   pnl         Float?
   pnlPercent  Float?
-  status      String   @default("open") // open | closed | stopped
+  status      String    @default("open")
   txid        String?
   closeTxid   String?
-  closeReason String?  // take_profit | stop_loss | manual
+  closeReason String?
 
   @@index([pair, createdAt])
   @@index([status])
 }
 
-// ─── Portfolio Snapshots ─────────────────────────────────────────────────────
 model PortfolioSnapshot {
-  id          Int      @id @default(autoincrement())
-  createdAt   DateTime @default(now())
-  totalValue  Float    // Total portfolio value in CAD
-  cadBalance  Float    @default(0)
-  btcBalance  Float    @default(0)
-  ethBalance  Float    @default(0)
-  solBalance  Float    @default(0)
-  ltcBalance  Float    @default(0)
-  xrpBalance  Float    @default(0)
-  otherValue  Float    @default(0)
-  btcPrice    Float?
-  ethPrice    Float?
-  solPrice    Float?
+  id         Int      @id @default(autoincrement())
+  createdAt  DateTime @default(now())
+  totalValue Float
+  cadBalance Float    @default(0)
+  btcBalance Float    @default(0)
+  ethBalance Float    @default(0)
+  solBalance Float    @default(0)
+  ltcBalance Float    @default(0)
+  xrpBalance Float    @default(0)
+  otherValue Float    @default(0)
+  btcPrice   Float?
+  ethPrice   Float?
+  solPrice   Float?
 
   @@index([createdAt])
 }
 
-// ─── Bot Activity Log ────────────────────────────────────────────────────────
 model ActivityLog {
   id        Int      @id @default(autoincrement())
   createdAt DateTime @default(now())
-  type      String   // info | warning | error | success | analyzing | executing | calculating | completed
-  message   String   @db.Text
+  type      String
+  message   String
   pair      String?
-  data      Json?    // Optional structured data
+  data      Json?
 
   @@index([createdAt])
   @@index([type])
   @@index([pair])
 }
 
-// ─── Market Intelligence Snapshots ──────────────────────────────────────────
 model MarketIntelligence {
-  id               Int      @id @default(autoincrement())
-  createdAt        DateTime @default(now())
-  pair             String
-  fearGreedValue   Int
-  fearGreedClass   String
-  redditSentiment  Float
-  overallSentiment String
-  overallScore     Float
-  coinDeskHeadlines Json?   // Array of headline strings
-  redditPosts      Json?    // Array of post objects
-  // Multi-timeframe consensus
-  consensusSignal  String?
-  buyCount         Int?
-  sellCount        Int?
-  holdCount        Int?
-  avgConfidence    Float?
+  id                Int      @id @default(autoincrement())
+  createdAt         DateTime @default(now())
+  pair              String
+  fearGreedValue    Int
+  fearGreedClass    String
+  redditSentiment   Float
+  overallSentiment  String
+  overallScore      Float
+  coinDeskHeadlines Json?
+  redditPosts       Json?
+  consensusSignal   String?
+  buyCount          Int?
+  sellCount         Int?
+  holdCount         Int?
+  avgConfidence     Float?
 
   @@index([pair, createdAt])
 }
 
-// ─── Price Candles Cache ─────────────────────────────────────────────────────
 model PriceCandle {
   id        Int      @id @default(autoincrement())
   pair      String
-  interval  Int      // minutes
-  time      Int      // Unix timestamp
+  interval  Int
+  time      Int
   open      Float
   high      Float
   low       Float
@@ -144,27 +130,35 @@ model PriceCandle {
   @@index([pair, interval, time])
 }
 
-// ─── Chat Conversations ──────────────────────────────────────────────────────
 model ChatConversation {
-  id        Int      @id @default(autoincrement())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  title     String?  // Auto-generated from first message
-  model     String   // e.g. "deepseek-r1:14b"
+  id        Int           @id @default(autoincrement())
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  title     String?
+  model     String
   messages  ChatMessage[]
 
   @@index([createdAt])
 }
 
 model ChatMessage {
-  id             Int      @id @default(autoincrement())
-  createdAt      DateTime @default(now())
+  id             Int              @id @default(autoincrement())
+  createdAt      DateTime         @default(now())
   conversationId Int
+  role           String
+  content        String
+  tokens         Int?
+  error          Boolean          @default(false)
   conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  role           String   // "user" | "assistant" | "system"
-  content        String   @db.Text
-  tokens         Int?     // Token count for this message
-  error          Boolean  @default(false)
 
   @@index([conversationId, createdAt])
+}
+
+model BotState {
+  id          Int      @id @default(1)
+  isRunning   Boolean  @default(false)
+  startedAt   DateTime?
+  stoppedAt   DateTime?
+  config      Json?
+  updatedAt   DateTime @updatedAt
 }

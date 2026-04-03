@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createTradingEngine } from '@/lib/trading-engine';
 import { getActivityLogger } from '@/lib/activity-logger';
+import { getBotState, setBotRunning, setBotStopped, shouldBotBeRunning } from '@/lib/bot-state';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -19,6 +20,34 @@ async function tryStandaloneBot(path: string, options?: RequestInit): Promise<Re
 
 // Fallback in-process engine (used if standalone bot not running)
 let engineInstance: ReturnType<typeof createTradingEngine> | null = null;
+let engineRecoveryAttempted = false;
+
+// Auto-recover bot if it was running before server restart
+async function recoverBotIfNeeded() {
+  if (engineRecoveryAttempted) return;
+  engineRecoveryAttempted = true;
+  
+  const { should, config } = await shouldBotBeRunning();
+  if (should && config && !engineInstance) {
+    console.log('[Bot Recovery] Restarting bot that was running before server restart...');
+    engineInstance = createTradingEngine({
+      pairs:             config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
+      autoExecute:       config.autoExecute ?? true,
+      minConfidence:     config.minConfidence ?? 75,
+      maxPositions:      config.maxPositions ?? 5,
+      riskPerTrade:      config.riskPerTrade ?? 0.05,
+      stopLossPercent:   config.stopLossPercent ?? 0.05,
+      takeProfitPercent: config.takeProfitPercent ?? 0.10,
+      checkInterval:     config.checkInterval ?? 5 * 60 * 1000,
+      tradingFeePercent: 0.0005,
+      minProfitMargin:   0.02,
+      tradeCooldownHours: 4,
+      maxDailyTrades:    20,
+    });
+    engineInstance.start().catch(err => console.error('Bot recovery error:', err));
+    console.log('[Bot Recovery] Bot restarted successfully');
+  }
+}
 
 // POST - Start/Stop/Control engine
 export async function POST(req: NextRequest) {
@@ -46,22 +75,32 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: 'Engine is already running' });
       }
 
-      engineInstance = createTradingEngine({
-        pairs:             ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
-        autoExecute:       true,
-        minConfidence:     75,
-        maxPositions:      5,
-        riskPerTrade:      0.05,
-        stopLossPercent:   0.05,
-        takeProfitPercent: 0.10,
-        checkInterval:     5 * 60 * 1000,
+      const botConfig = {
+        pairs:             config?.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
+        autoExecute:       config?.autoExecute ?? true,
+        minConfidence:     config?.minConfidence ?? 75,
+        maxPositions:      config?.maxPositions ?? 5,
+        riskPerTrade:      config?.riskPerTrade ?? 0.05,
+        stopLossPercent:   config?.stopLossPercent ?? 0.05,
+        takeProfitPercent: config?.takeProfitPercent ?? 0.10,
+        checkInterval:     config?.checkInterval ?? 5 * 60 * 1000,
         tradingFeePercent: 0.0005,
         minProfitMargin:   0.02,
         tradeCooldownHours: 4,
         maxDailyTrades:    20,
-        ...config,
-      });
+      };
+
+      engineInstance = createTradingEngine(botConfig);
       engineInstance.start().catch(err => console.error('Engine start error:', err));
+      
+      // Persist state to database
+      console.log('[Engine Route] About to call setBotRunning...');
+      try {
+        await setBotRunning(botConfig);
+        console.log('[Engine Route] setBotRunning completed');
+      } catch (e) {
+        console.error('[Engine Route] setBotRunning failed:', e);
+      }
 
       return NextResponse.json({
         success: true,
@@ -71,11 +110,20 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'stop') {
-      if (!engineInstance) {
-        return NextResponse.json({ success: false, error: 'Engine is not running' });
+      if (engineInstance) {
+        engineInstance.stop();
+        engineInstance = null;
       }
-      engineInstance.stop();
-      engineInstance = null;
+      
+      // Persist state to database
+      console.log('[Engine Route] About to call setBotStopped...');
+      try {
+        await setBotStopped();
+        console.log('[Engine Route] setBotStopped completed');
+      } catch (e) {
+        console.error('[Engine Route] setBotStopped failed:', e);
+      }
+      
       return NextResponse.json({ success: true, message: 'Trading engine stopped' });
     }
 
@@ -95,13 +143,25 @@ export async function GET(req: NextRequest) {
       return NextResponse.json(await botRes.json());
     }
 
+    // Try to recover bot if it was running before
+    await recoverBotIfNeeded();
+
+    // Get persisted state from database
+    const dbState = await getBotState();
+    
     // Fallback to in-process engine
-    const status = engineInstance?.getStatus() || {
-      isRunning: false,
-      config: null,
-      activePositions: 0,
+    const engineStatus = engineInstance?.getStatus();
+    const status = {
+      isRunning: engineStatus?.isRunning || dbState.isRunning,
+      config: engineStatus?.config || dbState.config,
+      activePositions: engineStatus?.activePositions || 0,
+      startedAt: dbState.startedAt,
     };
-    const activities = getActivityLogger().getActivities();
+    
+    // Load activities from database if memory is empty
+    const logger = getActivityLogger();
+    await logger.loadFromDatabase();
+    const activities = logger.getActivities();
 
     return NextResponse.json({
       success: true,
