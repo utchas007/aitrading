@@ -59,8 +59,11 @@ export default function TradingDashboard() {
   const [tradeAmount, setTradeAmount] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<{
     ib: boolean;
+    ibAccount: string | null;
+    ibConnected: boolean;
+    marketOpen: boolean;
     news: boolean;
-  }>({ ib: false, news: false });
+  }>({ ib: false, ibAccount: null, ibConnected: false, marketOpen: false, news: false });
   const [clock, setClock] = useState<{
     utc: string;
     et: string;
@@ -117,6 +120,28 @@ export default function TradingDashboard() {
     }
   };
 
+  // Fetch IB connection status
+  const fetchIBStatus = async () => {
+    try {
+      const res = await fetch('/api/ib/health');
+      const data = await res.json();
+      if (data.success && data.health) {
+        setConnectionStatus(prev => ({
+          ...prev,
+          ib: true,
+          ibConnected: data.health.connected,
+          ibAccount: data.health.accounts?.[0] || null,
+          marketOpen: data.health.market_status?.is_open || false,
+        }));
+      } else {
+        setConnectionStatus(prev => ({ ...prev, ib: false, ibConnected: false, ibAccount: null }));
+      }
+    } catch (error) {
+      console.error('Failed to fetch IB status:', error);
+      setConnectionStatus(prev => ({ ...prev, ib: false, ibConnected: false, ibAccount: null }));
+    }
+  };
+
   // Fetch IB account balance
   const fetchBalance = async () => {
     try {
@@ -124,11 +149,9 @@ export default function TradingDashboard() {
       const data = await res.json();
       if (data.success) {
         setBalance(data.balance);
-        setConnectionStatus(prev => ({ ...prev, ib: true }));
       }
     } catch (error) {
       console.error('Failed to fetch IB balance:', error);
-      setConnectionStatus(prev => ({ ...prev, ib: false }));
     }
   };
 
@@ -214,6 +237,7 @@ export default function TradingDashboard() {
     setLoading(true);
     Promise.all([
       fetchEngineStocks(),
+      fetchIBStatus(),
       fetchBalance(),
       fetchMarketData(),
       fetchNews(),
@@ -222,6 +246,7 @@ export default function TradingDashboard() {
     // Refresh every 30 seconds
     const interval = setInterval(() => {
       fetchEngineStocks();
+      fetchIBStatus();
       fetchBalance();
       fetchMarketData();
       fetchNews();
@@ -270,6 +295,51 @@ export default function TradingDashboard() {
               AI Trading <span style={{ color: '#00ff9f' }}>Dashboard</span>
             </h1>
             <p style={{ color: '#666', fontSize: 14 }}>Powered by DeepSeek R1 • Interactive Brokers • Worldmonitor News</p>
+            
+            {/* IB Connection Status Indicator */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              marginTop: 12,
+              padding: '8px 16px',
+              background: connectionStatus.ibConnected ? '#00ff9f15' : '#ff4d6d15',
+              border: `1px solid ${connectionStatus.ibConnected ? '#00ff9f40' : '#ff4d6d40'}`,
+              borderRadius: 8,
+              width: 'fit-content',
+            }}>
+              {/* IB Connection Dot */}
+              <div style={{
+                width: 10,
+                height: 10,
+                borderRadius: '50%',
+                background: connectionStatus.ibConnected ? '#00ff9f' : '#ff4d6d',
+                boxShadow: connectionStatus.ibConnected ? '0 0 8px #00ff9f' : '0 0 8px #ff4d6d',
+                animation: connectionStatus.ibConnected ? 'none' : 'pulse 2s infinite',
+              }} />
+              
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: connectionStatus.ibConnected ? '#00ff9f' : '#ff4d6d',
+                  }}>
+                    {connectionStatus.ibConnected ? '✅ Interactive Brokers Connected' : '❌ IB Disconnected'}
+                  </span>
+                </div>
+                {connectionStatus.ibConnected && connectionStatus.ibAccount && (
+                  <span style={{ fontSize: 11, color: '#888' }}>
+                    Account: {connectionStatus.ibAccount} {connectionStatus.marketOpen ? '• Market Open' : '• Market Closed'}
+                  </span>
+                )}
+                {!connectionStatus.ibConnected && (
+                  <span style={{ fontSize: 11, color: '#666' }}>
+                    Start TWS/Gateway and run ib_service.py
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Live Clock & Market Session */}
