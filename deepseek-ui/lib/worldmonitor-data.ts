@@ -3,7 +3,7 @@
  * Extracts market-relevant data from World Monitor for trading analysis
  */
 
-const WORLDMONITOR_URL = process.env.WORLDMONITOR_URL || 'http://localhost:3003';
+const WORLDMONITOR_URL = process.env.WORLDMONITOR_URL || 'http://localhost:3000';
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
 

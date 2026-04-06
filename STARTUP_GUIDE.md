@@ -80,7 +80,7 @@ npm run dev:all
 | WebSocket Server | ws://localhost:3002 | Real-time updates |
 | IB Service API | http://localhost:8765 | IB REST API |
 | IB API Docs | http://localhost:8765/docs | Swagger docs |
-| World Monitor | http://localhost:3003 | Global market data |
+| World Monitor | http://localhost:3000 | Global market data |
 | Ollama | http://localhost:11434 | AI model API |
 
 ---
@@ -119,7 +119,7 @@ IB_SERVICE_URL=http://localhost:8765
 OLLAMA_MODEL=deepseek-r1:14b
 
 # World Monitor
-WORLDMONITOR_URL=http://localhost:3003
+WORLDMONITOR_URL=http://localhost:3000
 ```
 
 ---
