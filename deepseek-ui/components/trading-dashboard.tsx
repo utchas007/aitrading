@@ -78,6 +78,12 @@ export default function TradingDashboard() {
     news: boolean;
   }>({ ib: false, ibAccount: null, ibConnected: false, marketOpen: false, news: false });
 
+  const [worldMonitorStatus, setWorldMonitorStatus] = useState<{
+    connected: boolean;
+    services: { news: boolean; indices: boolean; commodities: boolean; geopolitics: boolean };
+    servicesActive: number;
+  }>({ connected: false, services: { news: false, indices: false, commodities: false, geopolitics: false }, servicesActive: 0 });
+
   // Update state from WebSocket data
   useEffect(() => {
     if (Object.keys(wsPrices).length > 0) {
@@ -175,6 +181,26 @@ export default function TradingDashboard() {
       }
     } catch {
       // keep defaults
+    }
+  };
+
+  // Fetch World Monitor status
+  const fetchWorldMonitorStatus = async () => {
+    try {
+      const res = await fetch('/api/worldmonitor/health');
+      const data = await res.json();
+      if (data.success && data.health) {
+        setWorldMonitorStatus({
+          connected: data.health.connected,
+          services: data.health.services,
+          servicesActive: data.summary.servicesActive,
+        });
+      } else {
+        setWorldMonitorStatus(prev => ({ ...prev, connected: false }));
+      }
+    } catch (error) {
+      console.error('Failed to fetch World Monitor status:', error);
+      setWorldMonitorStatus(prev => ({ ...prev, connected: false }));
     }
   };
 
@@ -299,11 +325,13 @@ export default function TradingDashboard() {
       fetchBalance(),
       fetchMarketData(),
       fetchNews(),
+      fetchWorldMonitorStatus(),
     ]).finally(() => setLoading(false));
 
-    // Refresh news every 60 seconds (other data comes via WebSocket)
+    // Refresh news and World Monitor status every 60 seconds
     const interval = setInterval(() => {
       fetchNews();
+      fetchWorldMonitorStatus();
     }, 60000);
 
     return () => clearInterval(interval);
@@ -395,6 +423,62 @@ export default function TradingDashboard() {
                 {!connectionStatus.ibConnected && (
                   <span style={{ fontSize: 11, color: '#666' }}>
                     Start TWS/Gateway and run ib_service.py
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* World Monitor Connection Status Indicator */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              marginTop: 8,
+              padding: '8px 16px',
+              background: worldMonitorStatus.connected ? '#3b82f615' : '#ff4d6d15',
+              border: `1px solid ${worldMonitorStatus.connected ? '#3b82f640' : '#ff4d6d40'}`,
+              borderRadius: 8,
+              width: 'fit-content',
+            }}>
+              {/* World Monitor Connection Dot */}
+              <div style={{
+                width: 10,
+                height: 10,
+                borderRadius: '50%',
+                background: worldMonitorStatus.connected ? '#3b82f6' : '#ff4d6d',
+                boxShadow: worldMonitorStatus.connected ? '0 0 8px #3b82f6' : '0 0 8px #ff4d6d',
+                animation: worldMonitorStatus.connected ? 'none' : 'pulse 2s infinite',
+              }} />
+              
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: worldMonitorStatus.connected ? '#3b82f6' : '#ff4d6d',
+                  }}>
+                    {worldMonitorStatus.connected ? 'World Monitor Connected' : 'World Monitor Disconnected'}
+                  </span>
+                </div>
+                {worldMonitorStatus.connected && (
+                  <div style={{ display: 'flex', gap: 8, fontSize: 10, color: '#888' }}>
+                    <span style={{ color: worldMonitorStatus.services.news ? '#00ff9f' : '#666' }}>
+                      News {worldMonitorStatus.services.news ? '●' : '○'}
+                    </span>
+                    <span style={{ color: worldMonitorStatus.services.indices ? '#00ff9f' : '#666' }}>
+                      Indices {worldMonitorStatus.services.indices ? '●' : '○'}
+                    </span>
+                    <span style={{ color: worldMonitorStatus.services.commodities ? '#00ff9f' : '#666' }}>
+                      Commodities {worldMonitorStatus.services.commodities ? '●' : '○'}
+                    </span>
+                    <span style={{ color: worldMonitorStatus.services.geopolitics ? '#00ff9f' : '#666' }}>
+                      Geopolitics {worldMonitorStatus.services.geopolitics ? '●' : '○'}
+                    </span>
+                  </div>
+                )}
+                {!worldMonitorStatus.connected && (
+                  <span style={{ fontSize: 11, color: '#666' }}>
+                    Start World Monitor: cd ~/worldmonitor && npm run dev:finance
                   </span>
                 )}
               </div>
