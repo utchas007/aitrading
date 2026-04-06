@@ -5,6 +5,8 @@ import AnalysisPanel from "./analysis-panel";
 import TradingChart from "./trading-chart";
 import PortfolioChart from "./portfolio-chart";
 import { MarketIntelligencePanel } from "./market-intelligence-panel";
+import WebSocketStatus from "./websocket-status";
+import { useWebSocketContext } from "@/contexts/WebSocketContext";
 
 interface IBTicker {
   symbol: string;
@@ -46,6 +48,17 @@ interface TradingSignal {
 const DEFAULT_STOCKS = ['AAPL', 'MSFT', 'NVDA', 'TSLA'];
 
 export default function TradingDashboard() {
+  // WebSocket real-time data
+  const {
+    prices: wsPrices,
+    balance: wsBalance,
+    positions: wsPositions,
+    botStatus: wsBotStatus,
+    ibHealth: wsIbHealth,
+    connected: wsConnected,
+    lastUpdate: wsLastUpdate,
+  } = useWebSocketContext();
+
   const [stocks, setStocks] = useState<string[]>(DEFAULT_STOCKS);
   const [balance, setBalance] = useState<any>(null);
   const [marketData, setMarketData] = useState<MarketData | null>(null);
@@ -64,6 +77,51 @@ export default function TradingDashboard() {
     marketOpen: boolean;
     news: boolean;
   }>({ ib: false, ibAccount: null, ibConnected: false, marketOpen: false, news: false });
+
+  // Update state from WebSocket data
+  useEffect(() => {
+    if (Object.keys(wsPrices).length > 0) {
+      const data: MarketData = {};
+      Object.entries(wsPrices).forEach(([symbol, ticker]: [string, any]) => {
+        data[symbol] = {
+          symbol,
+          last: ticker.price,
+          close: ticker.prevClose || ticker.price,
+          bid: ticker.bid,
+          ask: ticker.ask,
+          volume: ticker.volume,
+          change: ticker.changePercent,
+          source: ticker.source,
+          timestamp: ticker.timestamp,
+        };
+      });
+      setMarketData(data);
+    }
+  }, [wsPrices]);
+
+  useEffect(() => {
+    if (wsBalance) {
+      setBalance(wsBalance);
+    }
+  }, [wsBalance]);
+
+  useEffect(() => {
+    if (wsIbHealth) {
+      setConnectionStatus(prev => ({
+        ...prev,
+        ib: true,
+        ibConnected: wsIbHealth.connected,
+        ibAccount: wsIbHealth.accounts?.[0] || null,
+        marketOpen: wsIbHealth.market_status?.is_open || false,
+      }));
+    }
+  }, [wsIbHealth]);
+
+  useEffect(() => {
+    if (wsBotStatus?.config?.pairs) {
+      setStocks(wsBotStatus.config.pairs);
+    }
+  }, [wsBotStatus]);
   const [clock, setClock] = useState<{
     utc: string;
     et: string;
@@ -243,14 +301,10 @@ export default function TradingDashboard() {
       fetchNews(),
     ]).finally(() => setLoading(false));
 
-    // Refresh every 30 seconds
+    // Refresh news every 60 seconds (other data comes via WebSocket)
     const interval = setInterval(() => {
-      fetchEngineStocks();
-      fetchIBStatus();
-      fetchBalance();
-      fetchMarketData();
       fetchNews();
-    }, 30000);
+    }, 60000);
 
     return () => clearInterval(interval);
   }, []);
@@ -295,6 +349,11 @@ export default function TradingDashboard() {
               AI Trading <span style={{ color: '#00ff9f' }}>Dashboard</span>
             </h1>
             <p style={{ color: '#666', fontSize: 14 }}>Powered by DeepSeek R1 • Interactive Brokers • Worldmonitor News</p>
+            
+            {/* WebSocket Status */}
+            <div style={{ marginTop: 8, marginBottom: 8 }}>
+              <WebSocketStatus />
+            </div>
             
             {/* IB Connection Status Indicator */}
             <div style={{
