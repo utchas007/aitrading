@@ -325,7 +325,7 @@ export default function TradingDashboard() {
                     fontWeight: 700,
                     color: connectionStatus.ibConnected ? '#00ff9f' : '#ff4d6d',
                   }}>
-                    {connectionStatus.ibConnected ? '✅ Interactive Brokers Connected' : '❌ IB Disconnected'}
+                    {connectionStatus.ibConnected ? 'Interactive Brokers Connected' : 'IB Disconnected'}
                   </span>
                 </div>
                 {connectionStatus.ibConnected && connectionStatus.ibAccount && (
