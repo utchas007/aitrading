@@ -2,6 +2,26 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const IB_SERVICE_URL = process.env.IB_SERVICE_URL || 'http://localhost:8765';
 
+// In-memory cache for OHLC data (refreshes every 60 seconds)
+const ohlcCache: Map<string, { data: any; timestamp: number }> = new Map();
+const CACHE_TTL = 60000; // 60 seconds for OHLC data
+
+function getCacheKey(symbol: string, barSize: string, duration: string): string {
+  return `${symbol}:${barSize}:${duration}`;
+}
+
+function getCachedOHLC(key: string): any | null {
+  const cached = ohlcCache.get(key);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+}
+
+function setCachedOHLC(key: string, data: any): void {
+  ohlcCache.set(key, { data, timestamp: Date.now() });
+}
+
 // Map barSize+duration to Yahoo Finance interval+range
 function toYahooParams(barSize: string, duration: string): { interval: string; range: string } {
   if (barSize.includes('min') || barSize.includes('secs')) {
@@ -55,6 +75,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'symbol is required' }, { status: 400 });
   }
 
+  // Check cache first
+  const cacheKey = getCacheKey(symbol, barSize, duration);
+  const cached = getCachedOHLC(cacheKey);
+  if (cached) {
+    return NextResponse.json({ ...cached, cached: true });
+  }
+
   // Try IB first
   try {
     const params = new URLSearchParams({ sec_type: secType, exchange, currency, bar_size: barSize, duration });
@@ -64,7 +91,9 @@ export async function GET(req: NextRequest) {
     if (ibRes.ok) {
       const bars = await ibRes.json();
       if (Array.isArray(bars) && bars.length > 0) {
-        return NextResponse.json({ success: true, bars, source: 'ib' });
+        const response = { success: true, bars, source: 'ib' };
+        setCachedOHLC(cacheKey, response);
+        return NextResponse.json(response);
       }
     }
   } catch { /* fall through to Yahoo */ }
@@ -72,7 +101,9 @@ export async function GET(req: NextRequest) {
   // Fallback: Yahoo Finance (free, no subscription needed)
   try {
     const bars = await fetchFromYahoo(symbol, barSize, duration);
-    return NextResponse.json({ success: true, bars, source: 'yahoo' });
+    const response = { success: true, bars, source: 'yahoo' };
+    setCachedOHLC(cacheKey, response);
+    return NextResponse.json(response);
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }

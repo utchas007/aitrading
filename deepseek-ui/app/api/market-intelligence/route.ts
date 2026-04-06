@@ -6,6 +6,10 @@ import { calculateEnhancedIndicators } from '@/lib/market-intelligence';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// Cache market intelligence for 60 seconds (external APIs are slow)
+const cache: Map<string, { data: any; timestamp: number }> = new Map();
+const CACHE_TTL = 60000; // 60 seconds
+
 /**
  * GET /api/market-intelligence?pair=AAPL&timeframes=5,60,240&accountValue=100000
  * Returns sentiment (Fear&Greed, VIX, SPY trend, earnings), multi-timeframe analysis,
@@ -18,6 +22,13 @@ export async function GET(req: NextRequest) {
     const timeframesParam = searchParams.get('timeframes') || '5,60,240';
     const accountValue = parseFloat(searchParams.get('accountValue') || '100000');
     const timeframes = timeframesParam.split(',').map(Number).filter(n => !isNaN(n) && n > 0);
+
+    // Check cache
+    const cacheKey = `${pair}:${timeframesParam}:${accountValue}`;
+    const cached = cache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return NextResponse.json({ ...cached.data, cached: true });
+    }
 
     // Fetch sentiment + multi-timeframe in parallel
     const sentimentPromise = getMarketSentiment(pair);
@@ -101,7 +112,7 @@ export async function GET(req: NextRequest) {
       sentiment.earnings.riskLevel,
     );
 
-    return NextResponse.json({
+    const response = {
       success: true,
       pair,
       timestamp: new Date().toISOString(),
@@ -116,7 +127,12 @@ export async function GET(req: NextRequest) {
         totalTimeframes: validTimeframes.length,
       },
       positionSizing,
-    });
+    };
+
+    // Store in cache
+    cache.set(cacheKey, { data: response, timestamp: Date.now() });
+
+    return NextResponse.json(response);
   } catch (error: any) {
     console.error('Market intelligence error:', error);
     return NextResponse.json(

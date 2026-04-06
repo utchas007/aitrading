@@ -3,9 +3,26 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// In-memory cache for stock prices (refreshes every 10 seconds)
+const priceCache: Map<string, { data: any; timestamp: number }> = new Map();
+const CACHE_TTL = 10000; // 10 seconds
+
+function getCachedPrice(symbol: string): any | null {
+  const cached = priceCache.get(symbol);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+}
+
+function setCachedPrice(symbol: string, data: any): void {
+  priceCache.set(symbol, { data, timestamp: Date.now() });
+}
+
 /**
  * GET /api/stocks/ticker?symbols=AAPL,MSFT,NVDA
  * Fetches stock prices from IB (if available) or Yahoo Finance fallback
+ * Uses 10-second cache to speed up dashboard refresh
  */
 export async function GET(req: NextRequest) {
   const symbols = req.nextUrl.searchParams.get('symbols')?.split(',') || [];
@@ -15,10 +32,32 @@ export async function GET(req: NextRequest) {
   }
 
   const results: Record<string, any> = {};
+  const symbolsToFetch: string[] = [];
 
+  // Check cache first
+  for (const symbol of symbols) {
+    const sym = symbol.trim().toUpperCase();
+    const cached = getCachedPrice(sym);
+    if (cached) {
+      results[sym] = cached;
+    } else {
+      symbolsToFetch.push(sym);
+    }
+  }
+
+  // If all symbols cached, return immediately
+  if (symbolsToFetch.length === 0) {
+    return NextResponse.json({
+      success: true,
+      data: results,
+      count: Object.keys(results).length,
+      cached: true,
+    });
+  }
+
+  // Fetch only non-cached symbols
   await Promise.allSettled(
-    symbols.map(async (symbol) => {
-      const sym = symbol.trim().toUpperCase();
+    symbolsToFetch.map(async (sym) => {
       
       // Try IB first
       try {
@@ -28,7 +67,7 @@ export async function GET(req: NextRequest) {
         if (ibRes.ok) {
           const data = await ibRes.json();
           if (data.last || data.close) {
-            results[sym] = {
+            const tickerData = {
               symbol: sym,
               price: data.last || data.close,
               bid: data.bid,
@@ -39,6 +78,8 @@ export async function GET(req: NextRequest) {
               source: 'ib',
               timestamp: data.timestamp,
             };
+            results[sym] = tickerData;
+            setCachedPrice(sym, tickerData);
             return;
           }
         }
@@ -64,7 +105,7 @@ export async function GET(req: NextRequest) {
             const change = price - prevClose;
             const changePercent = prevClose > 0 ? ((change / prevClose) * 100) : 0;
             
-            results[sym] = {
+            const tickerData = {
               symbol: sym,
               price,
               bid: null,
@@ -78,6 +119,8 @@ export async function GET(req: NextRequest) {
               source: 'yahoo',
               timestamp: new Date().toISOString(),
             };
+            results[sym] = tickerData;
+            setCachedPrice(sym, tickerData);
           }
         }
       } catch (e) {
