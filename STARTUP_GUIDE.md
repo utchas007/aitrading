@@ -53,10 +53,21 @@ cd ~/worldmonitor
 nohup npm run dev:finance > /tmp/worldmonitor.log 2>&1 &
 ```
 
-### 6. Start Next.js Trading Dashboard
+### 6. Start WebSocket Server (Real-Time Updates)
+```bash
+cd ~/Trading\ Project/deepseek-ui
+npm run ws &
+```
+
+### 7. Start Next.js Trading Dashboard
 ```bash
 cd ~/Trading\ Project/deepseek-ui
 npm run dev
+```
+
+**Or start both together:**
+```bash
+npm run dev:all
 ```
 
 ---
@@ -66,6 +77,7 @@ npm run dev
 | Service | URL | Description |
 |---------|-----|-------------|
 | Trading Dashboard | http://localhost:3001 | Main UI |
+| WebSocket Server | ws://localhost:3002 | Real-time updates |
 | IB Service API | http://localhost:8765 | IB REST API |
 | IB API Docs | http://localhost:8765/docs | Swagger docs |
 | World Monitor | http://localhost:3003 | Global market data |
@@ -144,7 +156,13 @@ echo "🌍 Starting World Monitor..."
 cd ~/worldmonitor 2>/dev/null && nohup npm run dev:finance > /tmp/worldmonitor.log 2>&1 &
 sleep 2
 
-# 5. Next.js
+# 5. WebSocket Server
+echo "🔌 Starting WebSocket Server..."
+cd ~/Trading\ Project/deepseek-ui
+npm run ws &
+sleep 2
+
+# 6. Next.js
 echo "💻 Starting Trading Dashboard..."
 cd ~/Trading\ Project/deepseek-ui
 npm run dev &
@@ -279,6 +297,7 @@ psql -h localhost -U tradingbot -d tradingdb -c "SELECT 1"
 | Port | Service |
 |------|---------|
 | 3001 | Next.js Dashboard |
+| 3002 | WebSocket Server (real-time) |
 | 3003 | World Monitor |
 | 7497 | TWS Paper Trading |
 | 7496 | TWS Live Trading |
