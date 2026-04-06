@@ -115,6 +115,7 @@ ib.RaiseRequestErrors = False   # don't raise on subscription timeouts — keeps
 _ib_loop  : Optional[asyncio.AbstractEventLoop] = None
 _ib_ready = threading.Event()   # set when connected (or on failure)
 _ib_lock  = threading.Lock()
+_last_connected: Optional[datetime] = None
 
 # ─── Known conIds for common US stocks (avoids qualifyContractsAsync round-trip) ─────────────────
 _KNOWN_CON_IDS: dict[str, int] = {
@@ -164,15 +165,17 @@ async def _get_contract(symbol: str, sec_type: str, exchange: str, currency: str
 
 def _ib_thread_main():
     """Entry point for the dedicated IB thread."""
-    global _ib_loop
+    global _ib_loop, _last_connected
     _ib_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_ib_loop)
 
     async def _connect():
+        global _last_connected
         try:
             await ib.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT, timeout=15)
             accounts = ib.managedAccounts()
             print(f"[IB] Connected — accounts: {accounts}")
+            _last_connected = datetime.now(EASTERN)
             # Subscribe to account updates so accountValues() and positions() are populated
             if accounts:
                 # ib_insync's reqAccountUpdates() is auto-called on connect - just wait for data
@@ -180,6 +183,8 @@ def _ib_thread_main():
                 await asyncio.sleep(3)  # Give time for initial account data to arrive
                 vals = ib.accountValues()
                 print(f"[IB] Got {len(vals)} account values")
+            # Start auto-reconnect monitor for daily IB reset
+            _ib_loop.create_task(_auto_reconnect_monitor())
         except Exception as e:
             print(f"[IB] Startup connect failed: {e}")
             print(f"[IB] Will retry on first request. Make sure TWS/Gateway is on port {IB_PORT}.")
@@ -188,6 +193,48 @@ def _ib_thread_main():
 
     _ib_loop.run_until_complete(_connect())
     _ib_loop.run_forever()    # keep running for callbacks and reconnects
+
+
+async def _auto_reconnect_monitor():
+    """
+    Monitor IB connection and auto-reconnect if dropped.
+    IB has a daily server reset around 11:45 PM - 12:00 AM ET.
+    This task runs every 30 seconds to check connection status.
+    """
+    global _last_connected
+    print("[IB] Auto-reconnect monitor started (handles daily 11:45 PM ET reset)")
+    
+    while True:
+        await asyncio.sleep(30)  # Check every 30 seconds
+        
+        try:
+            if not ib.isConnected():
+                now_et = datetime.now(EASTERN)
+                print(f"[IB] Connection lost at {now_et.strftime('%Y-%m-%d %H:%M:%S ET')}")
+                print("[IB] Attempting to reconnect...")
+                
+                # Wait a bit before reconnecting (IB may still be resetting)
+                await asyncio.sleep(5)
+                
+                # Try to reconnect with retries
+                for attempt in range(5):
+                    try:
+                        await ib.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT, timeout=15)
+                        if ib.isConnected():
+                            _last_connected = datetime.now(EASTERN)
+                            accounts = ib.managedAccounts()
+                            print(f"[IB] Reconnected successfully! Accounts: {accounts}")
+                            # Wait for account data
+                            await asyncio.sleep(3)
+                            break
+                    except Exception as e:
+                        print(f"[IB] Reconnect attempt {attempt + 1}/5 failed: {e}")
+                        await asyncio.sleep(10)  # Wait 10 seconds between retries
+                
+                if not ib.isConnected():
+                    print("[IB] Failed to reconnect after 5 attempts. Will keep trying...")
+        except Exception as e:
+            print(f"[IB] Auto-reconnect monitor error: {e}")
 
 
 def _start_ib_thread():
@@ -300,6 +347,8 @@ async def health():
         "port":          IB_PORT,
         "accounts":      ib.managedAccounts() if ib.isConnected() else [],
         "market_status": get_market_status(),
+        "last_connected": _last_connected.strftime('%Y-%m-%d %H:%M:%S ET') if _last_connected else None,
+        "auto_reconnect": True,
     }
 
 
