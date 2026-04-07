@@ -33,7 +33,7 @@ async function recoverBotIfNeeded() {
     engineInstance = createTradingEngine({
       pairs:             config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
       autoExecute:       config.autoExecute ?? true,
-      minConfidence:     config.minConfidence ?? 75,
+      minConfidence:     config.minConfidence ?? 60,
       maxPositions:      config.maxPositions ?? 5,
       riskPerTrade:      config.riskPerTrade ?? 0.05,
       stopLossPercent:   config.stopLossPercent ?? 0.05,
@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
       const botConfig = {
         pairs:             config?.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
         autoExecute:       config?.autoExecute ?? true,
-        minConfidence:     config?.minConfidence ?? 75,
+        minConfidence:     config?.minConfidence ?? 60,
         maxPositions:      config?.maxPositions ?? 5,
         riskPerTrade:      config?.riskPerTrade ?? 0.05,
         stopLossPercent:   config?.stopLossPercent ?? 0.05,

@@ -556,8 +556,8 @@ export function calculatePositionSize(
   const estimatedFees = parseFloat(cappedFee.toFixed(2));
   const estimatedRoundTripFees = parseFloat((estimatedFees * 2).toFixed(2));
 
-  // Min profit = round trip fees × 2 (safe buffer)
-  const minimumProfitNeeded = parseFloat((estimatedRoundTripFees * 2).toFixed(2));
+  // Min profit = round trip fees × 3 (buffer for slippage + edge uncertainty at elevated VIX)
+  const minimumProfitNeeded = parseFloat((estimatedRoundTripFees * 3).toFixed(2));
 
   // Expected profit if take-profit is hit
   const expectedProfit = parseFloat(((takeProfitPrice - price) * finalShares).toFixed(2));

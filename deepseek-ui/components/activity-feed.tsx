@@ -68,7 +68,7 @@ export default function ActivityFeed() {
           action: "start",
           config: {
             autoExecute,
-            minConfidence: 75,
+            minConfidence: 60,
             checkInterval,
             pairs: botStatus?.config?.pairs ?? ["AAPL", "MSFT", "NVDA", "TSLA"],
           },

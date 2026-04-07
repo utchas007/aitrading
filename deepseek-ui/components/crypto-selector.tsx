@@ -121,7 +121,7 @@ export default function CryptoSelector() {
           config: {
             pairs: selectedPairs,
             autoExecute: true,
-            minConfidence: 75,
+            minConfidence: 60,
             maxPositions: Math.min(selectedPairs.length, 10),
             riskPerTrade: 0.15,
             stopLossPercent: 0.10,

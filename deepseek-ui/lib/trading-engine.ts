@@ -109,7 +109,7 @@ export class TradingEngine {
     this.config = {
       pairs: config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA'],
       checkInterval: config.checkInterval || 2 * 60 * 1000, // 2 minutes
-      minConfidence: config.minConfidence || 85,
+      minConfidence: config.minConfidence || 60,
       maxPositions: config.maxPositions || 4,
       riskPerTrade: config.riskPerTrade || 0.10, // 10% of available cash per trade
       stopLossPercent: config.stopLossPercent || 0.05, // 5% stop loss
@@ -468,16 +468,59 @@ export class TradingEngine {
       else if (technicalSignals.overallSignal === 'strong_sell' || technicalSignals.overallSignal === 'sell') action = 'sell';
     }
 
-    // Apply SPY downtrend filter — suppress BUY signals when market is falling
+    // ── SPY downtrend: penalty not hard block ────────────────────────────────
+    // Subtracts 30pts — only very high-conviction signals (90+) survive.
+    // Preserves mean-reversion entries that still occur during downtrends.
     if (action === 'buy' && marketSentiment?.spyTrend.trend === 'downtrend') {
-      logActivity.warning(`${pair}: BUY suppressed — SPY downtrend. Switching to HOLD.`);
-      action = 'hold';
-      confidence = Math.min(confidence, 40);
+      confidence = Math.max(0, confidence - 30);
+      logActivity.warning(`${pair}: SPY downtrend — BUY confidence penalized -30pts → ${confidence}%`);
+      if (confidence < this.config.minConfidence) {
+        logActivity.warning(`${pair}: Confidence below threshold after penalty. Switching to HOLD.`);
+        action = 'hold';
+      }
     }
 
     // Apply sentiment penalty — reduce confidence when market is bearish
     if (marketSentiment && marketSentiment.overallSentiment === 'Bearish') {
       if (action === 'buy') confidence = Math.max(0, confidence - 15);
+    }
+
+    // ── Micro filter 1: Volume confirmation ──────────────────────────────────
+    // Require at least 1.3× average volume to confirm the move is real.
+    if (action !== 'hold') {
+      const volumeRatio = technicalSignals.volume.average > 0
+        ? technicalSignals.volume.current / technicalSignals.volume.average
+        : 1;
+      if (volumeRatio < 1.3) {
+        logActivity.warning(`${pair}: Weak volume (${volumeRatio.toFixed(1)}× avg) — insufficient conviction. Switching to HOLD.`);
+        action = 'hold';
+      }
+    }
+
+    // ── Micro filter 2: Bollinger Band + RSI alignment ───────────────────────
+    // Below lower band is only a valid long if RSI confirms oversold (<40).
+    // Above upper band is only a valid short if RSI confirms overbought (>60).
+    if (action === 'buy' && technicalSignals.bollingerBands.position === 'below') {
+      if (technicalSignals.rsi >= 40) {
+        logActivity.warning(`${pair}: Below BB but RSI not oversold (${technicalSignals.rsi.toFixed(0)}) — false signal. HOLD.`);
+        action = 'hold';
+      }
+    }
+    if (action === 'sell' && technicalSignals.bollingerBands.position === 'above') {
+      if (technicalSignals.rsi <= 60) {
+        logActivity.warning(`${pair}: Above BB but RSI not overbought (${technicalSignals.rsi.toFixed(0)}) — false signal. HOLD.`);
+        action = 'hold';
+      }
+    }
+
+    // ── Micro filter 3: VIX + MACD stability ─────────────────────────────────
+    // At elevated VIX (>22), require MACD histogram > 0 to confirm trend has
+    // actual momentum behind it — not just a noise spike.
+    if (action !== 'hold' && (marketSentiment?.vix.value ?? 0) > 22) {
+      if (technicalSignals.macd.histogram <= 0) {
+        logActivity.warning(`${pair}: Elevated VIX + MACD histogram ≤ 0 (${technicalSignals.macd.histogram.toFixed(2)}) — no momentum. HOLD.`);
+        action = 'hold';
+      }
     }
 
     // ── Step 5: Fee-aware position sizing via ATR ─────────────────────────────

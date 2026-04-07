@@ -12,13 +12,18 @@ type PrismaClientType = InstanceType<typeof PrismaClient>;
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClientType | undefined;
+  pool: Pool | undefined;
 };
 
 function createPrismaClient(): PrismaClientType {
-  const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-  });
-  const adapter = new PrismaPg(pool);
+  // Reuse the pool across hot reloads so it's never garbage-collected
+  // while the Prisma client still holds a reference to it.
+  if (!globalForPrisma.pool) {
+    globalForPrisma.pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+    });
+  }
+  const adapter = new PrismaPg(globalForPrisma.pool);
   return new PrismaClient({
     adapter,
     log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
