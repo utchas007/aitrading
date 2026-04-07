@@ -150,7 +150,7 @@ export default function StockSelector() {
           config: {
             pairs: selectedSymbols,
             autoExecute: currentAutoExecute,
-            minConfidence: 60,
+            minConfidence: 75,
             maxPositions: Math.min(selectedSymbols.length, 10),
             riskPerTrade: 0.10,
             stopLossPercent: 0.05,

@@ -1,8 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 
 interface Crypto {
   pair: string;
@@ -121,7 +119,7 @@ export default function CryptoSelector() {
           config: {
             pairs: selectedPairs,
             autoExecute: true,
-            minConfidence: 60,
+            minConfidence: 75,
             maxPositions: Math.min(selectedPairs.length, 10),
             riskPerTrade: 0.15,
             stopLossPercent: 0.10,

@@ -109,7 +109,7 @@ export class TradingEngine {
     this.config = {
       pairs: config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA'],
       checkInterval: config.checkInterval || 2 * 60 * 1000, // 2 minutes
-      minConfidence: config.minConfidence || 60,
+      minConfidence: config.minConfidence || 75,
       maxPositions: config.maxPositions || 4,
       riskPerTrade: config.riskPerTrade || 0.10, // 10% of available cash per trade
       stopLossPercent: config.stopLossPercent || 0.05, // 5% stop loss
@@ -468,16 +468,11 @@ export class TradingEngine {
       else if (technicalSignals.overallSignal === 'strong_sell' || technicalSignals.overallSignal === 'sell') action = 'sell';
     }
 
-    // ── SPY downtrend: penalty not hard block ────────────────────────────────
-    // Subtracts 30pts — only very high-conviction signals (90+) survive.
-    // Preserves mean-reversion entries that still occur during downtrends.
+    // ── SPY downtrend: hard block BUY, allow SELL ────────────────────────────
+    // In a downtrend don't buy dips — but SELL signals are valid and desirable.
     if (action === 'buy' && marketSentiment?.spyTrend.trend === 'downtrend') {
-      confidence = Math.max(0, confidence - 30);
-      logActivity.warning(`${pair}: SPY downtrend — BUY confidence penalized -30pts → ${confidence}%`);
-      if (confidence < this.config.minConfidence) {
-        logActivity.warning(`${pair}: Confidence below threshold after penalty. Switching to HOLD.`);
-        action = 'hold';
-      }
+      logActivity.warning(`${pair}: SPY downtrend — BUY blocked. SELL signals still allowed.`);
+      action = 'hold';
     }
 
     // Apply sentiment penalty — reduce confidence when market is bearish
