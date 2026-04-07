@@ -52,12 +52,24 @@ const TIER_LABELS = { large: "Large Cap", mid: "Mid Cap", small: "Small Cap" };
 export default function StockSelector() {
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [currentSymbols, setCurrentSymbols] = useState<string[]>([]);
+  const [currentAutoExecute, setCurrentAutoExecute] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [prices, setPrices] = useState<{ [key: string]: { price: string | null } }>({});
   const [sectorFilter, setSectorFilter] = useState<string>("All");
 
   useEffect(() => {
+    // Show cached prices immediately, then refresh in background
+    const cached = localStorage.getItem("stock_prices_cache");
+    if (cached) {
+      try {
+        const { data, ts } = JSON.parse(cached);
+        // Use cache if under 5 minutes old
+        if (Date.now() - ts < 5 * 60 * 1000) {
+          setPrices(data);
+        }
+      } catch {}
+    }
     fetchCurrentConfig();
     fetchPrices();
   }, []);
@@ -69,6 +81,7 @@ export default function StockSelector() {
       if (data.success && data.status?.config?.pairs) {
         setCurrentSymbols(data.status.config.pairs);
         setSelectedSymbols(data.status.config.pairs);
+        setCurrentAutoExecute(data.status.config.autoExecute ?? false);
       } else {
         // Default selection
         setSelectedSymbols(["AAPL", "MSFT", "NVDA", "TSLA"]);
@@ -79,20 +92,22 @@ export default function StockSelector() {
   };
 
   const fetchPrices = async () => {
-    const results = await Promise.allSettled(
-      AVAILABLE_STOCKS.map(s =>
-        fetch(`/api/ib/ticker?symbol=${s.symbol}`)
-          .then(r => r.json())
-          .then(d => ({ symbol: s.symbol, price: d.success ? (d.ticker?.last ?? d.ticker?.close ?? null) : null }))
-      )
-    );
-    const priceData: typeof prices = {};
-    results.forEach(r => {
-      if (r.status === "fulfilled") {
-        priceData[r.value.symbol] = { price: r.value.price != null ? parseFloat(r.value.price).toFixed(2) : null };
+    try {
+      const symbols = AVAILABLE_STOCKS.map(s => s.symbol).join(",");
+      const res = await fetch(`/api/stocks/ticker?symbols=${symbols}`);
+      const data = await res.json();
+      if (data.success && data.data) {
+        const priceData: typeof prices = {};
+        for (const [symbol, info] of Object.entries(data.data as Record<string, any>)) {
+          const p = info?.price ?? null;
+          priceData[symbol] = { price: p != null ? parseFloat(p).toFixed(2) : null };
+        }
+        setPrices(priceData);
+        localStorage.setItem("stock_prices_cache", JSON.stringify({ data: priceData, ts: Date.now() }));
       }
-    });
-    setPrices(priceData);
+    } catch {
+      // silently fail — prices will just show "—"
+    }
   };
 
   const toggle = (symbol: string) => {
@@ -134,13 +149,13 @@ export default function StockSelector() {
           action: "start",
           config: {
             pairs: selectedSymbols,
-            autoExecute: false,   // paper mode — change to true only when ready
+            autoExecute: currentAutoExecute,
             minConfidence: 85,
             maxPositions: Math.min(selectedSymbols.length, 10),
             riskPerTrade: 0.10,
             stopLossPercent: 0.05,
             takeProfitPercent: 0.10,
-            checkInterval: 30 * 60 * 1000,
+            checkInterval: 2 * 60 * 1000,
           },
         }),
       });
@@ -266,7 +281,9 @@ export default function StockSelector() {
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 10, color: "#555", marginBottom: 4 }}>MODE</div>
-          <div style={{ fontSize: 14, color: "#ffd60a", fontWeight: 600, paddingTop: 4 }}>PAPER</div>
+          <div style={{ fontSize: 14, color: currentAutoExecute ? "#ff4d6d" : "#ffd60a", fontWeight: 600, paddingTop: 4 }}>
+            {currentAutoExecute ? "LIVE" : "PAPER"}
+          </div>
         </div>
       </div>
 

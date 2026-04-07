@@ -126,7 +126,7 @@ export default function CryptoSelector() {
             riskPerTrade: 0.15,
             stopLossPercent: 0.10,
             takeProfitPercent: 0.20,
-            checkInterval: 5 * 60 * 1000,
+            checkInterval: 2 * 60 * 1000,
           },
         }),
       });

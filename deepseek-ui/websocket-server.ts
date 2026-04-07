@@ -27,7 +27,7 @@ const latestData: {
   ibHealth: null,
 };
 
-const WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'];
+const WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'JPM', 'META', 'XOM', 'AMD'];
 
 async function fetchWithTimeout(url: string, timeout = 5000): Promise<any> {
   const controller = new AbortController();

@@ -629,26 +629,82 @@ export default function TradingDashboard() {
                 <div style={{ fontSize: 12, color: '#666', marginBottom: 12 }}>ACCOUNT METRICS</div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {[
-                    ['Available Funds', balance['AvailableFunds_USD'] ?? balance['AvailableFunds_CAD'] ?? balance['AvailableFunds_BASE']],
-                    ['Buying Power',    balance['BuyingPower_USD']    ?? balance['BuyingPower_CAD']    ?? balance['BuyingPower_BASE']],
-                    ['Unrealized P&L',  balance['UnrealizedPnL_USD']  ?? balance['UnrealizedPnL_CAD']  ?? balance['UnrealizedPnL_BASE']],
-                    ['Realized P&L',    balance['RealizedPnL_USD']    ?? balance['RealizedPnL_CAD']    ?? balance['RealizedPnL_BASE']],
-                  ].filter(([, v]) => v != null).map(([label, value]) => (
-                    <div key={label as string} style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      padding: '10px 12px',
-                      background: '#0d0d1e',
-                      borderRadius: 8,
-                      border: '1px solid #1a1a2e',
-                    }}>
-                      <span style={{ fontSize: 13, color: '#888' }}>{label}</span>
-                      <span style={{ fontSize: 13, color: '#00ff9f', fontFamily: 'monospace' }}>
-                        ${parseFloat(value as string).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                  ))}
+                    ['Available Funds', balance['AvailableFunds_USD'] ?? balance['AvailableFunds_CAD'] ?? balance['AvailableFunds_BASE'], false],
+                    ['Buying Power',    balance['BuyingPower_USD']    ?? balance['BuyingPower_CAD']    ?? balance['BuyingPower_BASE'],    false],
+                    ['Unrealized P&L',  balance['UnrealizedPnL_USD']  ?? balance['UnrealizedPnL_CAD']  ?? balance['UnrealizedPnL_BASE'],  true],
+                    ['Realized P&L',    balance['RealizedPnL_USD']    ?? balance['RealizedPnL_CAD']    ?? balance['RealizedPnL_BASE'],    true],
+                  ].filter(([, v]) => v != null).map(([label, value, isPnl]) => {
+                    const num = parseFloat(value as string);
+                    const color = isPnl ? (num >= 0 ? '#00ff9f' : '#ff4d6d') : '#00ff9f';
+                    const prefix = isPnl && num > 0 ? '+' : '';
+                    return (
+                      <div key={label as string} style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        padding: '10px 12px',
+                        background: isPnl && num !== 0 ? `${color}08` : '#0d0d1e',
+                        borderRadius: 8,
+                        border: `1px solid ${isPnl && num !== 0 ? `${color}33` : '#1a1a2e'}`,
+                      }}>
+                        <span style={{ fontSize: 13, color: '#888' }}>{label as string}</span>
+                        <span style={{ fontSize: 13, color, fontFamily: 'monospace', fontWeight: isPnl ? 700 : 400 }}>
+                          {prefix}${num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
+
+                {/* Open Positions */}
+                {wsPositions && wsPositions.length > 0 && (
+                  <div style={{ marginTop: 20 }}>
+                    <div style={{ fontSize: 12, color: '#666', marginBottom: 12 }}>OPEN POSITIONS</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {wsPositions.map((pos) => {
+                        const currentPrice = wsPrices[pos.symbol]?.price ?? 0;
+                        const unrealizedPnl = currentPrice
+                          ? (currentPrice - pos.avg_cost) * pos.position
+                          : null;
+                        const pnlPct = currentPrice && pos.avg_cost
+                          ? ((currentPrice - pos.avg_cost) / pos.avg_cost) * 100
+                          : null;
+                        const pnlColor = unrealizedPnl == null ? '#888' : unrealizedPnl >= 0 ? '#00ff9f' : '#ff4d6d';
+                        return (
+                          <div key={pos.symbol} style={{
+                            padding: '10px 12px',
+                            background: '#0d0d1e',
+                            borderRadius: 8,
+                            border: '1px solid #1a1a2e',
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                              <span style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>{pos.symbol}</span>
+                              {unrealizedPnl != null && (
+                                <span style={{ fontSize: 13, color: pnlColor, fontFamily: 'monospace', fontWeight: 700 }}>
+                                  {unrealizedPnl >= 0 ? '+' : ''}${unrealizedPnl.toFixed(2)}
+                                  {pnlPct != null && (
+                                    <span style={{ fontSize: 11, marginLeft: 6 }}>
+                                      ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+                                    </span>
+                                  )}
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <span style={{ fontSize: 11, color: '#555' }}>
+                                {pos.position} shares @ ${pos.avg_cost.toFixed(2)}
+                              </span>
+                              {currentPrice > 0 && (
+                                <span style={{ fontSize: 11, color: '#555' }}>
+                                  Now ${currentPrice.toFixed(2)}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </>
             ) : (
               <div style={{ textAlign: 'center', padding: 40, color: '#666' }}>

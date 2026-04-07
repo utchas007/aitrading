@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getMarketSession } from '@/lib/market-hours';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -50,19 +51,10 @@ export async function POST(req: NextRequest) {
     // Time context — AI must know when it is to reason about market sessions and news recency
     const now = new Date();
     const etNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const etHour = etNow.getHours();
-    const etMin  = etNow.getMinutes();
-    const etDay  = etNow.getDay(); // 0=Sun, 6=Sat
-    const isWeekend = etDay === 0 || etDay === 6;
-    const isPreMarket   = !isWeekend && etHour >= 4  && (etHour < 9  || (etHour === 9  && etMin < 30));
-    const isRegularHours = !isWeekend && (etHour > 9 || (etHour === 9 && etMin >= 30)) && etHour < 16;
-    const isAfterHours  = !isWeekend && etHour >= 16 && etHour < 20;
-    const marketSession = isWeekend ? 'Weekend (market closed)' : isPreMarket ? 'Pre-market (4:00–9:30 AM ET)' : isRegularHours ? 'Regular hours (9:30 AM–4:00 PM ET)' : isAfterHours ? 'After-hours (4:00–8:00 PM ET)' : 'Market closed';
-    const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const { session: marketSession } = getMarketSession();
     const timeContext = `CURRENT TIME & MARKET SESSION:
 Date: ${now.toUTCString()}
 Eastern Time: ${etNow.toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: 'America/New_York' })}
-Day: ${dayNames[etDay]}
 Market Session: ${marketSession}
 Note: US stock markets are open Monday–Friday 9:30 AM–4:00 PM ET. Consider the session when assessing urgency of signals.\n`;
 

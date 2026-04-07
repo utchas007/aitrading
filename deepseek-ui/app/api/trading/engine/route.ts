@@ -38,7 +38,7 @@ async function recoverBotIfNeeded() {
       riskPerTrade:      config.riskPerTrade ?? 0.05,
       stopLossPercent:   config.stopLossPercent ?? 0.05,
       takeProfitPercent: config.takeProfitPercent ?? 0.10,
-      checkInterval:     config.checkInterval ?? 5 * 60 * 1000,
+      checkInterval:     config.checkInterval ?? 2 * 60 * 1000,
       tradingFeePercent: 0.0005,
       minProfitMargin:   0.02,
       tradeCooldownHours: 4,
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
         riskPerTrade:      config?.riskPerTrade ?? 0.05,
         stopLossPercent:   config?.stopLossPercent ?? 0.05,
         takeProfitPercent: config?.takeProfitPercent ?? 0.10,
-        checkInterval:     config?.checkInterval ?? 5 * 60 * 1000,
+        checkInterval:     config?.checkInterval ?? 2 * 60 * 1000,
         tradingFeePercent: 0.0005,
         minProfitMargin:   0.02,
         tradeCooldownHours: 4,
@@ -135,7 +135,7 @@ export async function POST(req: NextRequest) {
 }
 
 // GET - Get engine status and activities
-export async function GET(req: NextRequest) {
+export async function GET(_req: NextRequest) {
   try {
     // Try standalone bot first
     const botRes = await tryStandaloneBot('/status');

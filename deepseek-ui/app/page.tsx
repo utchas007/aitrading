@@ -6,6 +6,7 @@ import TradingDashboard from "@/components/trading-dashboard";
 import ActivityFeed from "@/components/activity-feed";
 import CryptoSelector from "@/components/crypto-selector";
 import StockSelector from "@/components/stock-selector";
+import NotificationBell from "@/components/notification-bell";
 
 type View = 'chat' | 'trading' | 'crypto' | 'stocks';
 
@@ -98,8 +99,9 @@ export default function Home() {
           )}
         </div>
 
-        {/* Right: Navigation Buttons */}
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {/* Right: Navigation + Notifications */}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <NotificationBell />
           {NAV_ITEMS.map(({ id, label }) => (
             <button
               key={id}

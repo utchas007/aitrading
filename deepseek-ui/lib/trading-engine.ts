@@ -12,8 +12,10 @@ import {
   SentimentSummary,
 } from './market-intelligence';
 import {
-  getWorldMonitorSummary, getMarketContextForAI, GeopoliticalRisk,
+  getWorldMonitorSummary, getMarketContextForAI,
 } from './worldmonitor-data';
+import { getMarketSession } from './market-hours';
+import { saveNotification } from './notify';
 
 // Async DB write — fire and forget, never blocks the bot
 async function saveSignalToDb(signal: TradeSignal, marketSentiment?: SentimentSummary | null): Promise<void> {
@@ -57,6 +59,7 @@ export interface TradeSignal {
   reasoning: string;
   technicalSignals: TechnicalSignals;
   timestamp: number;
+  marketSentiment?: SentimentSummary | null;
 }
 
 export interface ActivePosition {
@@ -71,6 +74,7 @@ export interface ActivePosition {
   pnl: number;
   pnlPercent: number;
   timestamp: number;
+  dbTradeId?: number; // DB Trade.id for updating on close
 }
 
 export interface TradingEngineConfig {
@@ -93,6 +97,9 @@ export class TradingEngine {
   private riskManager: RiskManager;
   private isRunning: boolean = false;
   private intervalId?: NodeJS.Timeout;
+  private positionIntervalId?: NodeJS.Timeout; // Fast loop: SL/TP monitoring every 30s
+  private ibFailureCount: number = 0;          // Consecutive IB health check failures
+  private readonly MAX_IB_FAILURES = 3;        // Stop engine after this many consecutive failures
   private activePositions: Map<string, ActivePosition> = new Map();
   private lastTradeTime: Map<string, number> = new Map(); // Track last trade time per pair
   private dailyTradeCount: number = 0;
@@ -101,7 +108,7 @@ export class TradingEngine {
   constructor(config: Partial<TradingEngineConfig> = {}) {
     this.config = {
       pairs: config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA'],
-      checkInterval: config.checkInterval || 30 * 60 * 1000, // 30 minutes
+      checkInterval: config.checkInterval || 2 * 60 * 1000, // 2 minutes
       minConfidence: config.minConfidence || 85,
       maxPositions: config.maxPositions || 4,
       riskPerTrade: config.riskPerTrade || 0.10, // 10% of available cash per trade
@@ -140,10 +147,13 @@ export class TradingEngine {
 
     this.isRunning = true;
 
-    // Run initial check
-    await this.checkMarkets();
+    // Fast loop: check SL/TP every 30s independently of signal generation
+    this.positionIntervalId = setInterval(() => {
+      if (getMarketSession().isOpen) this.updatePositions();
+    }, 30_000);
 
-    // Set up interval for continuous monitoring
+    // Run initial market check, then repeat at checkInterval
+    await this.checkMarkets();
     this.intervalId = setInterval(() => {
       this.checkMarkets();
     }, this.config.checkInterval);
@@ -165,12 +175,41 @@ export class TradingEngine {
       clearInterval(this.intervalId);
       this.intervalId = undefined;
     }
+    if (this.positionIntervalId) {
+      clearInterval(this.positionIntervalId);
+      this.positionIntervalId = undefined;
+    }
   }
 
   /**
    * Check all markets and generate trading signals
    */
   private async checkMarkets(): Promise<void> {
+    const session = getMarketSession();
+    if (!session.isOpen) {
+      const mins = Math.round(session.nextOpenMs / 60000);
+      const wait = mins > 60 ? `${Math.round(mins / 60)}h` : `${mins}m`;
+      logActivity.info(`⏸ Market closed (${session.session}) — next open in ${wait}. Skipping check.`);
+      console.log(`[Engine] Market closed (${session.session}), skipping. Next open in ${wait}.`);
+      return;
+    }
+
+    // IB health check — stop engine after MAX_IB_FAILURES consecutive failures
+    try {
+      const health = await createIBClient().getHealth();
+      if (!health.connected) throw new Error('IB reports disconnected');
+      this.ibFailureCount = 0; // reset on success
+    } catch (err: any) {
+      this.ibFailureCount++;
+      logActivity.error(`⚠️ IB health check failed (${this.ibFailureCount}/${this.MAX_IB_FAILURES}): ${err.message}`);
+      if (this.ibFailureCount >= this.MAX_IB_FAILURES) {
+        logActivity.error('🔴 IB unreachable — stopping engine to prevent silent failures. Restart once ib_service.py is running.');
+        saveNotification('ib_disconnected', 'IB Connection Lost', 'Bot stopped after 3 consecutive IB health check failures. Restart ib_service.py and TWS.');
+        this.stop();
+      }
+      return;
+    }
+
     console.log(`\n📊 Checking markets at ${new Date().toLocaleTimeString()}...`);
     logActivity.analyzing(`Checking markets for ${this.config.pairs.length} pairs...`);
 
@@ -181,29 +220,47 @@ export class TradingEngine {
       // Save portfolio snapshot before checking markets
       await this.savePortfolioSnapshot();
       
-      // Update active positions
-      await this.updatePositions();
+      // Pre-fetch all tickers once with a 2s stagger to respect IB pacing limits
+      // This replaces the N² pattern where each generateSignal() fetched all tickers again
+      const ib = createIBClient();
+      const marketData: Record<string, { price: number; volume: number; change24h: string }> = {};
+      logActivity.analyzing(`Fetching live prices for ${this.config.pairs.length} symbols...`);
+      for (const symbol of this.config.pairs) {
+        try {
+          const t = await ib.getTicker(symbol);
+          marketData[symbol] = {
+            price:     t.last ?? t.close ?? 0,
+            volume:    t.volume ?? 0,
+            change24h: '0',
+          };
+        } catch {
+          marketData[symbol] = { price: 0, volume: 0, change24h: '0' };
+        }
+        if (this.config.pairs.indexOf(symbol) < this.config.pairs.length - 1) {
+          await new Promise(r => setTimeout(r, 2000)); // 2s between ticker requests
+        }
+      }
 
-      // Check each trading pair — 12s delay between symbols to respect IB pacing limits
+      // Check each trading pair — 12s delay between analysis cycles to respect IB OHLC pacing
       for (const pair of this.config.pairs) {
         try {
           logActivity.analyzing(`Analyzing ${pair}...`);
-          await new Promise(r => setTimeout(r, 12000)); // IB allows ~6 req/min per symbol
-          const signal = await this.generateSignal(pair);
+          await new Promise(r => setTimeout(r, 12000));
+          const signal = await this.generateSignal(pair, marketData);
           
           // Log the signal details
           logActivity.calculating(`${pair}: RSI ${signal.technicalSignals.rsi.toFixed(1)}, MACD ${signal.technicalSignals.macd.trend}, Confidence ${signal.confidence}%`);
-          
+
           if (signal.action !== 'hold' && signal.confidence >= this.config.minConfidence) {
             // Check if trade is allowed (cooldown, daily limit, profit margin)
             const tradeAllowed = this.isTradeAllowed(signal);
-            
+
             if (!tradeAllowed.allowed) {
               logActivity.warning(`❌ Trade blocked for ${pair}: ${tradeAllowed.reason}`);
               console.log(`\n❌ Trade blocked for ${pair}: ${tradeAllowed.reason}`);
               continue;
             }
-            
+
             console.log(`\n🎯 Signal generated for ${pair}:`);
             console.log(`   Action: ${signal.action.toUpperCase()}`);
             console.log(`   Confidence: ${signal.confidence}%`);
@@ -217,9 +274,9 @@ export class TradingEngine {
             logActivity.info(`🎯 Signal: ${signal.action.toUpperCase()} ${pair} | Confidence: ${signal.confidence}% | Entry: $${signal.entryPrice.toFixed(2)}`);
             logActivity.info(`📊 ${signal.reasoning}`);
             logActivity.info(`💰 Expected profit: ${tradeAllowed.expectedProfitPercent?.toFixed(2)}% after ${(this.config.tradingFeePercent * 200).toFixed(2)}% fees`);
-            
-            // Save signal to database
-            saveSignalToDb(signal, marketSentiment).catch(() => {});
+
+            // Save signal to database (sentiment returned alongside signal)
+            saveSignalToDb(signal, signal.marketSentiment).catch(() => {});
 
             if (this.config.autoExecute) {
               await this.executeSignal(signal);
@@ -296,10 +353,10 @@ export class TradingEngine {
   /**
    * Generate trading signal for a pair
    */
-  async generateSignal(pair: string): Promise<TradeSignal> {
+  async generateSignal(pair: string, marketData: Record<string, { price: number; volume: number; change24h: string }>): Promise<TradeSignal> {
     // Use daily bars — reliable, no IB pacing issues, good for swing trading signals
     const priceData = await getHistoricalPrices(pair, 1440);
-    
+
     if (priceData.length < 50) {
       throw new Error(`Insufficient price data for ${pair}`);
     }
@@ -310,22 +367,6 @@ export class TradingEngine {
 
     // Fetch World Monitor news for fundamental analysis
     const news = await this.fetchWorldMonitorNews();
-
-    // Get current market data for AI analysis via IB
-    const ib = createIBClient();
-    const marketData: any = {};
-    for (const symbol of this.config.pairs) {
-      try {
-        const t = await ib.getTicker(symbol);
-        marketData[symbol] = {
-          price:    t.last ?? t.close ?? currentPrice,
-          volume:   t.volume ?? 0,
-          change24h: '0',
-        };
-      } catch {
-        marketData[symbol] = { price: currentPrice, volume: 0, change24h: '0' };
-      }
-    }
 
     // Get AI sentiment analysis — pass technicals so AI has full context
     let aiAnalysis = null;
@@ -440,6 +481,7 @@ export class TradingEngine {
     }
 
     // ── Step 5: Fee-aware position sizing via ATR ─────────────────────────────
+    const ib = createIBClient();
     let availableCash = 10000;
     try {
       const balance = await ib.getBalance();
@@ -487,6 +529,7 @@ export class TradingEngine {
       reasoning,
       technicalSignals,
       timestamp: Date.now(),
+      marketSentiment,
     };
   }
 
@@ -594,13 +637,43 @@ export class TradingEngine {
         this.lastTradeTime.set(signal.pair, Date.now());
         this.dailyTradeCount++;
         logActivity.info(`📊 Daily trades: ${this.dailyTradeCount}/${this.config.maxDailyTrades}`);
+        saveNotification(
+          'trade_executed',
+          `${signal.action.toUpperCase()} ${signal.pair}`,
+          `${signal.positionSize} shares at $${signal.entryPrice.toFixed(2)} | OrderID: ${result.order_id} | SL: $${signal.stopLoss.toFixed(2)} TP: $${signal.takeProfit.toFixed(2)}`,
+          signal.pair,
+        );
       } else {
         logActivity.completed(`✅ Order validated (paper mode) — would ${signal.action.toUpperCase()} ${signal.positionSize} shares of ${signal.pair} at $${signal.entryPrice.toFixed(2)}`);
         if (result.commission) logActivity.info(`💰 Estimated commission: $${result.commission}`);
       }
 
-      // Track position locally
+      // Track position locally and persist to DB
       const posId = result.order_id?.toString() ?? `${signal.pair}-${Date.now()}`;
+
+      // Save open trade to DB (fire-and-forget, non-blocking)
+      let dbTradeId: number | undefined;
+      if (this.config.autoExecute) {
+        try {
+          const { prisma } = await import('./db');
+          const dbTrade = await prisma.trade.create({
+            data: {
+              pair:       signal.pair,
+              type:       signal.action,
+              entryPrice: signal.entryPrice,
+              volume:     signal.positionSize,
+              stopLoss:   signal.stopLoss,
+              takeProfit: signal.takeProfit,
+              status:     'open',
+              txid:       posId,
+            },
+          });
+          dbTradeId = dbTrade.id;
+        } catch (e) {
+          console.error('[DB] Failed to save trade:', e);
+        }
+      }
+
       this.activePositions.set(posId, {
         txid:         posId,
         pair:         signal.pair,
@@ -613,10 +686,17 @@ export class TradingEngine {
         pnl:          0,
         pnlPercent:   0,
         timestamp:    signal.timestamp,
+        dbTradeId,
       });
     } catch (error: any) {
       console.error(`❌ Failed to execute order:`, error.message);
       logActivity.error(`Failed to execute ${signal.action} order for ${signal.pair}: ${error.message}`);
+      saveNotification(
+        'trade_failed',
+        `Order Failed — ${signal.pair}`,
+        `${signal.action.toUpperCase()} ${signal.positionSize} shares: ${error.message}`,
+        signal.pair,
+      );
     }
   }
 
@@ -663,8 +743,7 @@ export class TradingEngine {
           console.log(`   P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%)`);
 
           if (this.config.autoExecute) {
-            // Close position
-            await this.closePosition(txid);
+            await this.closePosition(txid, shouldClose.reason ?? 'manual');
           }
         }
       }
@@ -676,7 +755,7 @@ export class TradingEngine {
   /**
    * Close a position
    */
-  private async closePosition(txid: string): Promise<void> {
+  private async closePosition(txid: string, closeReason = 'manual'): Promise<void> {
     const position = this.activePositions.get(txid);
     if (!position) return;
 
@@ -690,11 +769,29 @@ export class TradingEngine {
         action:        closeAction,
         quantity:      position.volume,
         order_type:    'MKT',
-        validate_only: false, // always execute closes
+        validate_only: !this.config.autoExecute,
       });
 
       console.log(`✅ Position closed successfully`);
       console.log(`   Final P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%)`);
+      logActivity.completed(`✅ Position closed — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${closeReason}`);
+
+      // Update trade record in DB
+      if (position.dbTradeId) {
+        import('./db').then(({ prisma }) =>
+          prisma.trade.update({
+            where: { id: position.dbTradeId },
+            data: {
+              exitPrice:   position.currentPrice,
+              pnl:         position.pnl,
+              pnlPercent:  position.pnlPercent,
+              status:      'closed',
+              closedAt:    new Date(),
+              closeReason,
+            },
+          })
+        ).catch(e => console.error('[DB] Failed to update trade on close:', e));
+      }
 
       // Remove from active positions
       this.activePositions.delete(txid);

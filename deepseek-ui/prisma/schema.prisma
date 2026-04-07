@@ -154,6 +154,19 @@ model ChatMessage {
   @@index([conversationId, createdAt])
 }
 
+model Notification {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  type      String   // 'trade_executed', 'trade_failed', 'ib_disconnected', 'bot_stopped'
+  title     String
+  message   String
+  pair      String?
+  read      Boolean  @default(false)
+
+  @@index([createdAt])
+  @@index([read])
+}
+
 model BotState {
   id          Int      @id @default(1)
   isRunning   Boolean  @default(false)
