@@ -104,8 +104,8 @@ export async function POST(req: NextRequest) {
         checkInterval:     config?.checkInterval ?? 2 * 60 * 1000,
         tradingFeePercent: 0.0005,
         minProfitMargin:   0.02,
-        tradeCooldownHours: 4,
-        maxDailyTrades:    20,
+        tradeCooldownHours: config?.tradeCooldownHours ?? 1,
+        maxDailyTrades:    config?.maxDailyTrades ?? 30,
       };
 
       engineInstance = createTradingEngine(botConfig);
