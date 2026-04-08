@@ -142,7 +142,16 @@ export async function POST(req: NextRequest) {
         console.error('[Engine Route] setBotStopped failed:', e);
       }
       
-      return NextResponse.json({ success: true, message: 'Trading engine stopped' });
+      // Return stopped status so UI can immediately update
+      return NextResponse.json({ 
+        success: true, 
+        message: 'Trading engine stopped',
+        status: {
+          isRunning: false,
+          config: null,
+          activePositions: 0,
+        }
+      });
     }
 
     return NextResponse.json({ success: false, error: 'Invalid action' }, { status: 400 });
@@ -167,14 +176,19 @@ export async function GET(_req: NextRequest) {
     // Get persisted state from database
     const dbState = await getBotState();
     
-    // Fallback to in-process engine
+    // Check in-process engine status
     const engineStatus = engineInstance?.getStatus();
+    
+    // Engine state takes priority if it exists, otherwise use database state
+    const isEngineRunning = engineInstance !== null && engineStatus?.isRunning === true;
     const status = {
-      isRunning: engineStatus?.isRunning || dbState.isRunning,
+      isRunning: isEngineRunning || dbState.isRunning,
       config: engineStatus?.config || dbState.config,
       activePositions: engineStatus?.activePositions || 0,
       startedAt: dbState.startedAt,
     };
+    
+    console.log('[Engine GET] Status:', { isEngineRunning, dbIsRunning: dbState.isRunning, finalIsRunning: status.isRunning });
     
     // Load activities from database if memory is empty
     const logger = getActivityLogger();

@@ -10,6 +10,7 @@ export default function ActivityFeed() {
   const [isTogglingMode, setIsTogglingMode] = useState(false);
   const [checkInterval, setCheckInterval] = useState(2 * 60 * 1000);
   const [lastTrade, setLastTrade] = useState<string | null>(null);
+  const [localIsLive, setLocalIsLive] = useState(false); // Local state for mode when bot is idle
   const lastActivityId = useRef<string | number | null>(null);
 
   const INTERVALS = [
@@ -22,7 +23,15 @@ export default function ActivityFeed() {
 
   const isRunning = botStatus?.isRunning ?? false;
   const activePositions = botStatus?.activePositions ?? 0;
-  const isLive = botStatus?.config?.autoExecute ?? false;
+  // Use bot config when running, otherwise use local state
+  const isLive = isRunning ? (botStatus?.config?.autoExecute ?? false) : localIsLive;
+
+  // Sync local state with bot config when bot starts
+  useEffect(() => {
+    if (isRunning && botStatus?.config?.autoExecute !== undefined) {
+      setLocalIsLive(botStatus.config.autoExecute);
+    }
+  }, [isRunning, botStatus?.config?.autoExecute]);
 
   // Request notification permission when bot starts
   useEffect(() => {
@@ -62,7 +71,7 @@ export default function ActivityFeed() {
   const startBot = async (autoExecute = isLive) => {
     setIsStarting(true);
     try {
-      await fetch("/api/trading/engine", {
+      const res = await fetch("/api/trading/engine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -75,6 +84,8 @@ export default function ActivityFeed() {
           },
         }),
       });
+      const data = await res.json();
+      console.log("[Bot] Start response:", data);
     } catch (error) {
       console.error("Failed to start bot:", error);
     }
@@ -84,28 +95,33 @@ export default function ActivityFeed() {
   const stopBot = async () => {
     setIsStopping(true);
     try {
-      await fetch("/api/trading/engine", {
+      const res = await fetch("/api/trading/engine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "stop" }),
       });
+      const data = await res.json();
+      console.log("[Bot] Stop response:", data);
     } catch (err) {
       console.error("Failed to stop bot:", err);
     }
     setIsStopping(false);
   };
 
-  // Toggle between live and safe mode — restarts bot only if already running
+  // Toggle between live and safe mode — restarts bot if running, otherwise just update local state
   const toggleMode = async () => {
     setIsTogglingMode(true);
     const newMode = !isLive;
     try {
       if (isRunning) {
+        // Bot is running — need to restart with new mode
         await stopBot();
         await new Promise(r => setTimeout(r, 500));
         await startBot(newMode);
+      } else {
+        // Bot is idle — just update local state for next start
+        setLocalIsLive(newMode);
       }
-      // If bot is idle, mode change takes effect on next manual start
     } catch (error) {
       console.error("Failed to toggle mode:", error);
     }
