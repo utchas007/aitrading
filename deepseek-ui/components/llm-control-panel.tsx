@@ -129,15 +129,14 @@ export default function LLMControlPanel() {
   };
 
   // Save message to DB
-  const saveMessageToDb = async (role: string, content: string, tokens?: number, error?: boolean) => {
-    if (!conversationId) return;
+  const saveMessageToDbWithId = async (id: number, role: string, content: string, tokens?: number, error?: boolean) => {
     try {
       await fetch('/api/chat/history', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'message',
-          conversationId,
+          conversationId: id,
           role,
           content,
           tokens,
@@ -163,10 +162,8 @@ export default function LLMControlPanel() {
     } catch (e) {
       // Ignore errors loading settings
     }
-    // Load chat history
+    // Load chat history (do NOT auto-create a conversation — create it only when first message is sent)
     loadChatHistory();
-    // Auto-create new conversation
-    startNewConversation();
   }, []);
 
   useEffect(() => {
@@ -181,8 +178,30 @@ export default function LLMControlPanel() {
     setInput("");
     setLoading(true);
     setStreamingText('');
+
+    // Lazily create a conversation the first time a message is sent
+    let activeConversationId = conversationId;
+    if (!activeConversationId) {
+      try {
+        const res = await fetch('/api/chat/history', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'create', model }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          activeConversationId = data.conversation.id;
+          setConversationId(activeConversationId);
+        }
+      } catch (e) {
+        console.error('Failed to create conversation:', e);
+      }
+    }
+
     // Save user message to DB
-    saveMessageToDb('user', input.trim());
+    if (activeConversationId) {
+      saveMessageToDbWithId(activeConversationId, 'user', input.trim());
+    }
 
     try {
       // Use streaming API
@@ -253,7 +272,7 @@ export default function LLMControlPanel() {
                   return updated;
                 });
                 // Save to DB
-                saveMessageToDb('assistant', fullText, tokensUsed, false);
+                if (activeConversationId) saveMessageToDbWithId(activeConversationId, 'assistant', fullText, tokensUsed, false);
               }
             } catch (e) {
               // Skip malformed JSON
@@ -273,7 +292,7 @@ export default function LLMControlPanel() {
         setTotalTokens(t => t + tokensUsed);
         setMessages(prev => [...prev, { role: "assistant", content: assistantText, ts: new Date(), tokens: tokensUsed }]);
         // Save to DB
-        saveMessageToDb('assistant', assistantText, tokensUsed, false);
+        if (activeConversationId) saveMessageToDbWithId(activeConversationId, 'assistant', assistantText, tokensUsed, false);
       }
     } catch (e: any) {
       console.error('Chat error:', e);
