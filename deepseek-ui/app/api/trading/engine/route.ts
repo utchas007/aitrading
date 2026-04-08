@@ -48,8 +48,8 @@ async function recoverBotIfNeeded() {
       checkInterval:     config.checkInterval ?? 2 * 60 * 1000,
       tradingFeePercent: 0.0005,
       minProfitMargin:   0.02,
-      tradeCooldownHours: 4,
-      maxDailyTrades:    20,
+      tradeCooldownHours: 1,
+      maxDailyTrades:    30,
     });
     engineInstance.start().catch(err => console.error('Bot recovery error:', err));
     console.log('[Bot Recovery] Bot restarted successfully');

@@ -136,7 +136,7 @@ if [ -d "$WM_DIR" ] && [ -f "$WM_DIR/package.json" ]; then
     npm install --prefix "$WM_DIR" --silent
   fi
   start_bg "worldmonitor" \
-    "npm start --prefix '$WM_DIR'" \
+    "npm run dev:finance --prefix '$WM_DIR'" \
     "$WM_LOG"
   wait_for_port 3000 "World Monitor" 30 || warn "World Monitor did not start (check $WM_LOG)"
 else
@@ -158,7 +158,7 @@ wait_for_port 3001 "Next.js" 90 || { err "Next.js failed to start (check $NEXT_L
 # ─── 4. WebSocket Server ──────────────────────────────────────────────────────
 echo "Starting WebSocket server (port 3002)..."
 start_bg "websocket" \
-  "npx ts-node '$NEXT_DIR/websocket-server.ts'" \
+  "cd '$NEXT_DIR' && npx tsx websocket-server.ts" \
   "$WS_LOG"
 wait_for_port 3002 "WebSocket server" 20 || warn "WebSocket server did not start (check $WS_LOG)"
 

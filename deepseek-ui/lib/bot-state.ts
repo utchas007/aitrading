@@ -4,6 +4,7 @@
  */
 
 import { prisma } from './db';
+import { Prisma } from '@prisma/client';
 
 export interface BotConfig {
   pairs: string[];
@@ -103,7 +104,7 @@ export async function setBotStopped(): Promise<void> {
         id: 1,
         isRunning: false,
         stoppedAt: new Date(),
-        config: null,
+        config: Prisma.JsonNull,
       },
     });
     console.log('[BotState] Bot stopped state saved');

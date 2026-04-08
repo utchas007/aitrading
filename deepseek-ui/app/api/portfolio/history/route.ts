@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
         id:            true,
         createdAt:     true,
         totalValue:    true,
-        usdCash:       true,
+        cadCash:       true,
         unrealizedPnl: true,
         realizedPnl:   true,
         buyingPower:   true,
@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
     const history = snapshots.map(s => ({
       timestamp:     s.createdAt.getTime(),
       totalValue:    s.totalValue,
-      usdCash:       s.usdCash,
+      cadCash:       s.cadCash,
       unrealizedPnl: s.unrealizedPnl,
       realizedPnl:   s.realizedPnl,
       buyingPower:   s.buyingPower,

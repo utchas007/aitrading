@@ -108,6 +108,7 @@ export class TradingEngine {
   private lastTradeTime: Map<string, number> = new Map(); // Track last trade time per pair
   private dailyTradeCount: number = 0;
   private lastResetDate: string = new Date().toDateString();
+  private preOpenPrepDone: string = ''; // Date string of last pre-open prep (once per day)
 
   constructor(config: Partial<TradingEngineConfig> = {}) {
     this.config = {
@@ -121,8 +122,8 @@ export class TradingEngine {
       autoExecute: config.autoExecute || false,
       tradingFeePercent: config.tradingFeePercent || 0.0005, // IB ~$0.005/share ≈ 0.05% round-trip
       minProfitMargin: config.minProfitMargin || 0.02, // 2% minimum profit above fees
-      tradeCooldownHours: config.tradeCooldownHours || 4,
-      maxDailyTrades: config.maxDailyTrades || 4,
+      tradeCooldownHours: config.tradeCooldownHours || 1,
+      maxDailyTrades: config.maxDailyTrades || 30,
     };
 
     this.riskManager = createRiskManager({
@@ -197,8 +198,15 @@ export class TradingEngine {
     if (!session.isOpen) {
       const mins = Math.round(session.nextOpenMs / 60000);
       const wait = mins > 60 ? `${Math.round(mins / 60)}h` : `${mins}m`;
-      logActivity.info(`⏸ Market closed (${session.session}) — next open in ${wait}. Skipping check.`);
-      console.log(`[Engine] Market closed (${session.session}), skipping. Next open in ${wait}.`);
+      const todayStr = new Date().toDateString();
+      // Run pre-open prep once per day, only within 30 minutes of open
+      if (mins <= 30 && this.preOpenPrepDone !== todayStr) {
+        logActivity.info(`📚 Market opens in ${mins}m — running pre-open prep...`);
+        await this.gatherOffHoursData();
+        this.preOpenPrepDone = todayStr;
+      } else {
+        console.log(`[Engine] Market closed (${session.session}), next open in ${wait}. Skipping.`);
+      }
       return;
     }
 
@@ -316,6 +324,51 @@ export class TradingEngine {
       console.error('Error in checkMarkets:', error);
       logActivity.error(`Market check failed: ${error}`);
     }
+  }
+
+  /**
+   * Off-hours prep: fetch OHLC history + news + AI sentiment so the bot is
+   * ready to act the moment the market opens. No live tickers, no execution.
+   */
+  private async gatherOffHoursData(): Promise<void> {
+    console.log(`\n📚 Pre-open prep at ${new Date().toLocaleTimeString()}...`);
+
+    const news = await this.fetchWorldMonitorNews();
+
+    for (const pair of this.config.pairs) {
+      try {
+        const priceData = await getHistoricalPrices(pair, 1440); // daily bars via Yahoo fallback
+        if (priceData.length < 50) {
+          logActivity.warning(`Off-hours prep: insufficient history for ${pair}, skipping`);
+          continue;
+        }
+
+        const technicalSignals = analyzeTechnicalIndicators(priceData);
+        const currentPrice = priceData[priceData.length - 1].close;
+
+        const technicalsForAI = {
+          rsi: technicalSignals.rsi,
+          rsiSignal: technicalSignals.rsiSignal,
+          macd: technicalSignals.macd,
+          bollingerBands: technicalSignals.bollingerBands,
+          ema: technicalSignals.ema,
+          volume: technicalSignals.volume,
+        };
+
+        const aiAnalysis = await this.getAISentimentAnalysis(
+          pair, news, { price: currentPrice, volume: 0, change24h: '0' }, technicalsForAI,
+        );
+
+        const sentiment = aiAnalysis?.sentiment ?? 'neutral';
+        logActivity.info(
+          `📚 [Off-hours] ${pair}: RSI ${technicalSignals.rsi.toFixed(1)}, MACD ${technicalSignals.macd.trend}, AI ${sentiment} — ready for open`,
+        );
+      } catch (err) {
+        logActivity.warning(`Off-hours prep failed for ${pair}: ${err}`);
+      }
+    }
+
+    logActivity.completed(`Off-hours prep complete for ${this.config.pairs.length} symbols.`);
   }
 
   /**

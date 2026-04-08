@@ -25,10 +25,10 @@ export async function POST(_req: NextRequest) {
 
     const balance = await res.json();
 
-    // Prefer USD net liquidation; fall back to CAD
+    // Prefer CAD net liquidation (CAD account); fall back to USD/BASE
     const totalValueStr =
-      balance['NetLiquidation_USD'] ??
       balance['NetLiquidation_CAD'] ??
+      balance['NetLiquidation_USD'] ??
       balance['NetLiquidation_BASE'] ??
       '0';
 
@@ -40,15 +40,15 @@ export async function POST(_req: NextRequest) {
       );
     }
 
-    const usdCash      = parseFloat(balance['TotalCashValue_USD']  ?? balance['TotalCashValue_CAD']  ?? '0') || null;
-    const unrealizedPnl = parseFloat(balance['UnrealizedPnL_USD'] ?? balance['UnrealizedPnL_CAD']  ?? '0') || null;
-    const realizedPnl   = parseFloat(balance['RealizedPnL_USD']   ?? balance['RealizedPnL_CAD']    ?? '0') || null;
-    const buyingPower   = parseFloat(balance['BuyingPower_USD']    ?? balance['BuyingPower_CAD']    ?? '0') || null;
+    const cadCash       = parseFloat(balance['TotalCashValue_CAD']  ?? balance['TotalCashValue_USD']  ?? '0') || null;
+    const unrealizedPnl = parseFloat(balance['UnrealizedPnL_CAD']  ?? balance['UnrealizedPnL_USD']   ?? '0') || null;
+    const realizedPnl   = parseFloat(balance['RealizedPnL_CAD']    ?? balance['RealizedPnL_USD']     ?? '0') || null;
+    const buyingPower   = parseFloat(balance['BuyingPower_CAD']     ?? balance['BuyingPower_USD']     ?? '0') || null;
 
     const snapshot = await prisma.portfolioSnapshot.create({
       data: {
         totalValue,
-        usdCash,
+        cadCash,
         unrealizedPnl,
         realizedPnl,
         buyingPower,

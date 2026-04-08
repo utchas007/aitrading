@@ -22,8 +22,8 @@ const CONFIG = {
   checkInterval: 5 * 60 * 1000, // 5 minutes
   tradingFeePercent: 0.0005,
   minProfitMargin: 0.02,
-  tradeCooldownHours: 4,
-  maxDailyTrades: 20,
+  tradeCooldownHours: 1,
+  maxDailyTrades: 30,
 };
 
 const PORT = 3002;

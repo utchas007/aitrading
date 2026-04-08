@@ -66,11 +66,11 @@ model Trade {
 model PortfolioSnapshot {
   id             Int      @id @default(autoincrement())
   createdAt      DateTime @default(now())
-  totalValue     Float    // NetLiquidation (USD or CAD)
-  usdCash        Float?   // TotalCashValue_USD
-  unrealizedPnl  Float?   // UnrealizedPnL_USD
-  realizedPnl    Float?   // RealizedPnL_USD
-  buyingPower    Float?   // BuyingPower_USD
+  totalValue     Float    // NetLiquidation_CAD
+  cadCash        Float?   // TotalCashValue_CAD
+  unrealizedPnl  Float?   // UnrealizedPnL_CAD
+  realizedPnl    Float?   // RealizedPnL_CAD
+  buyingPower    Float?   // BuyingPower_CAD
 
   @@index([createdAt])
 }
