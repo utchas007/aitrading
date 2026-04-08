@@ -49,12 +49,34 @@ const SECTOR_COLORS: Record<string, { bg: string; border: string; text: string }
 
 const TIER_LABELS = { large: "Large Cap", mid: "Mid Cap", small: "Small Cap" };
 
+// Risk/engine parameters that should be preserved across stock selection changes
+interface BotConfig {
+  autoExecute: boolean;
+  minConfidence: number;
+  maxPositions: number;
+  riskPerTrade: number;
+  stopLossPercent: number;
+  takeProfitPercent: number;
+  checkInterval: number;
+}
+
+const DEFAULT_CONFIG: BotConfig = {
+  autoExecute:       false,
+  minConfidence:     75,
+  maxPositions:      4,
+  riskPerTrade:      0.10,
+  stopLossPercent:   0.05,
+  takeProfitPercent: 0.10,
+  checkInterval:     2 * 60 * 1000,
+};
+
 export default function StockSelector() {
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [currentSymbols, setCurrentSymbols] = useState<string[]>([]);
-  const [currentAutoExecute, setCurrentAutoExecute] = useState(false);
+  const [currentConfig, setCurrentConfig] = useState<BotConfig>(DEFAULT_CONFIG);
   const [loading, setLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [prices, setPrices] = useState<{ [key: string]: { price: string | null } }>({});
   const [sectorFilter, setSectorFilter] = useState<string>("All");
 
@@ -79,11 +101,20 @@ export default function StockSelector() {
       const res = await fetch("/api/trading/engine");
       const data = await res.json();
       if (data.success && data.status?.config?.pairs) {
-        setCurrentSymbols(data.status.config.pairs);
-        setSelectedSymbols(data.status.config.pairs);
-        setCurrentAutoExecute(data.status.config.autoExecute ?? false);
+        const cfg = data.status.config;
+        setCurrentSymbols(cfg.pairs);
+        setSelectedSymbols(cfg.pairs);
+        // Preserve all existing risk params so applyChanges() doesn't overwrite them
+        setCurrentConfig({
+          autoExecute:       cfg.autoExecute       ?? DEFAULT_CONFIG.autoExecute,
+          minConfidence:     cfg.minConfidence      ?? DEFAULT_CONFIG.minConfidence,
+          maxPositions:      cfg.maxPositions       ?? DEFAULT_CONFIG.maxPositions,
+          riskPerTrade:      cfg.riskPerTrade       ?? DEFAULT_CONFIG.riskPerTrade,
+          stopLossPercent:   cfg.stopLossPercent    ?? DEFAULT_CONFIG.stopLossPercent,
+          takeProfitPercent: cfg.takeProfitPercent  ?? DEFAULT_CONFIG.takeProfitPercent,
+          checkInterval:     cfg.checkInterval      ?? DEFAULT_CONFIG.checkInterval,
+        });
       } else {
-        // Default selection
         setSelectedSymbols(["AAPL", "MSFT", "NVDA", "TSLA"]);
       }
     } catch {
@@ -126,10 +157,10 @@ export default function StockSelector() {
 
   const applyChanges = async () => {
     if (selectedSymbols.length === 0) {
-      alert("Please select at least one stock.");
+      setValidationError("Please select at least one stock.");
       return;
     }
-
+    setValidationError(null);
     setLoading(true);
     setSaveStatus("saving");
 
@@ -142,20 +173,16 @@ export default function StockSelector() {
 
       await new Promise(resolve => setTimeout(resolve, 1000));
 
+      // Preserve all existing risk/engine params — only update pairs and maxPositions
       const res = await fetch("/api/trading/engine", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "start",
           config: {
-            pairs: selectedSymbols,
-            autoExecute: currentAutoExecute,
-            minConfidence: 75,
-            maxPositions: Math.min(selectedSymbols.length, 10),
-            riskPerTrade: 0.10,
-            stopLossPercent: 0.05,
-            takeProfitPercent: 0.10,
-            checkInterval: 2 * 60 * 1000,
+            ...currentConfig,
+            pairs:       selectedSymbols,
+            maxPositions: Math.min(selectedSymbols.length, currentConfig.maxPositions),
           },
         }),
       });
@@ -172,7 +199,7 @@ export default function StockSelector() {
     } catch (error: any) {
       console.error("Failed to apply changes:", error);
       setSaveStatus("error");
-      alert(`Error: ${error.message}`);
+      setValidationError(`Error: ${error.message}`);
       setTimeout(() => setSaveStatus("idle"), 3000);
     } finally {
       setLoading(false);
@@ -281,8 +308,8 @@ export default function StockSelector() {
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 10, color: "#555", marginBottom: 4 }}>MODE</div>
-          <div style={{ fontSize: 14, color: currentAutoExecute ? "#ff4d6d" : "#ffd60a", fontWeight: 600, paddingTop: 4 }}>
-            {currentAutoExecute ? "LIVE" : "PAPER"}
+          <div style={{ fontSize: 14, color: currentConfig.autoExecute ? "#ff4d6d" : "#ffd60a", fontWeight: 600, paddingTop: 4 }}>
+            {currentConfig.autoExecute ? "LIVE" : "PAPER"}
           </div>
         </div>
       </div>
@@ -362,6 +389,18 @@ export default function StockSelector() {
           );
         })}
       </div>
+
+      {/* Inline validation / error message */}
+      {validationError && (
+        <div style={{
+          marginBottom: 12, padding: "10px 16px",
+          background: "#2a0a0a", border: "1px solid #ff4d6d44",
+          borderRadius: 6, color: "#ff4d6d", fontSize: 13,
+          textAlign: "center",
+        }}>
+          {validationError}
+        </div>
+      )}
 
       {/* Apply Button */}
       <div style={{

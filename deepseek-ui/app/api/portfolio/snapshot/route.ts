@@ -1,55 +1,57 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createKrakenClient } from '@/lib/kraken';
 import prisma from '@/lib/db';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+const IB_SERVICE_URL = process.env.IB_SERVICE_URL || 'http://localhost:8765';
+
 /**
  * POST /api/portfolio/snapshot
- * Save a portfolio snapshot to PostgreSQL
+ * Save a portfolio snapshot using IB account balance.
  */
-export async function POST(req: NextRequest) {
+export async function POST(_req: NextRequest) {
   try {
-    // Fetch current balance and create snapshot
-    const kraken = createKrakenClient();
-    const balance = await kraken.getBalance();
-    const ticker = await kraken.getTicker(['XXBTZCAD', 'XETHZCAD', 'SOLCAD']);
+    const res = await fetch(`${IB_SERVICE_URL}/balance`, {
+      signal: AbortSignal.timeout(5000),
+    });
 
-    const cadBalance = parseFloat(balance.ZCAD || '0');
-    const btcBalance = parseFloat(balance.XXBT || '0');
-    const ethBalance = parseFloat(balance.XETH || '0');
-    const solBalance = parseFloat(balance.SOL || '0');
-    const ltcBalance = parseFloat(balance.XLTC || '0');
-    const xrpBalance = parseFloat(balance.XXRP || '0');
+    if (!res.ok) {
+      return NextResponse.json(
+        { success: false, error: 'IB service unavailable' },
+        { status: 503 },
+      );
+    }
 
-    const btcPrice = ticker['XXBTZCAD'] ? parseFloat(ticker['XXBTZCAD'].c[0]) : 0;
-    const ethPrice = ticker['XETHZCAD'] ? parseFloat(ticker['XETHZCAD'].c[0]) : 0;
-    const solPrice = ticker['SOLCAD'] ? parseFloat(ticker['SOLCAD'].c[0]) : 0;
-    const ltcPrice = 0; // XLTCZCAD not available on Kraken CAD
-    const xrpPrice = 0; // XXRPZCAD not available on Kraken CAD
+    const balance = await res.json();
 
-    const totalValue =
-      cadBalance +
-      btcBalance * btcPrice +
-      ethBalance * ethPrice +
-      solBalance * solPrice +
-      ltcBalance * ltcPrice +
-      xrpBalance * xrpPrice;
+    // Prefer USD net liquidation; fall back to CAD
+    const totalValueStr =
+      balance['NetLiquidation_USD'] ??
+      balance['NetLiquidation_CAD'] ??
+      balance['NetLiquidation_BASE'] ??
+      '0';
 
-    // Save to PostgreSQL
+    const totalValue = parseFloat(totalValueStr);
+    if (!totalValue) {
+      return NextResponse.json(
+        { success: false, error: 'Could not determine portfolio value from IB balance' },
+        { status: 422 },
+      );
+    }
+
+    const usdCash      = parseFloat(balance['TotalCashValue_USD']  ?? balance['TotalCashValue_CAD']  ?? '0') || null;
+    const unrealizedPnl = parseFloat(balance['UnrealizedPnL_USD'] ?? balance['UnrealizedPnL_CAD']  ?? '0') || null;
+    const realizedPnl   = parseFloat(balance['RealizedPnL_USD']   ?? balance['RealizedPnL_CAD']    ?? '0') || null;
+    const buyingPower   = parseFloat(balance['BuyingPower_USD']    ?? balance['BuyingPower_CAD']    ?? '0') || null;
+
     const snapshot = await prisma.portfolioSnapshot.create({
       data: {
         totalValue,
-        cadBalance,
-        btcBalance,
-        ethBalance,
-        solBalance,
-        ltcBalance,
-        xrpBalance,
-        btcPrice: btcPrice || null,
-        ethPrice: ethPrice || null,
-        solPrice: solPrice || null,
+        usdCash,
+        unrealizedPnl,
+        realizedPnl,
+        buyingPower,
       },
     });
 
@@ -65,7 +67,7 @@ export async function POST(req: NextRequest) {
     console.error('Portfolio snapshot error:', error);
     return NextResponse.json(
       { success: false, error: error.message },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

@@ -97,10 +97,12 @@ def _next_open_str(now_et: datetime) -> str:
     next_day = (now_et + timedelta(days=days_until)).strftime("%A %b %d")
     return f"{next_day} at 09:30 ET"
 
+import secrets
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from ib_insync import IB, Contract, MarketOrder, LimitOrder, Stock, Forex, Crypto, util
+from fastapi.responses import JSONResponse
+from ib_insync import IB, Contract, MarketOrder, LimitOrder, StopOrder, Stock, Forex, Crypto, util
 from pydantic import BaseModel
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -108,6 +110,12 @@ IB_HOST     = os.getenv("IB_HOST",      "127.0.0.1")
 IB_PORT     = int(os.getenv("IB_PORT",  "7497"))   # 7497=paper TWS, 7496=live TWS, 4002=paper GW, 4001=live GW
 IB_CLIENT   = int(os.getenv("IB_CLIENT","10"))     # clientId 1 is often reserved by TWS
 SERVICE_PORT= int(os.getenv("IB_SERVICE_PORT", "8765"))
+
+# Optional API key auth — set IB_API_KEY env var to enable.
+# If unset the service is unauthenticated (safe for localhost-only setups).
+_API_KEY: str | None = os.getenv("IB_API_KEY") or None
+if _API_KEY:
+    print(f"[IB] API key auth ENABLED (X-API-Key header required)")
 
 # ─── IB runs in its own background thread with its own event loop ─────────────
 ib        = IB()
@@ -315,6 +323,18 @@ class OrderRequest(BaseModel):
     validate_only: bool = True     # SAFETY: True = dry-run by default
 
 
+class BracketOrderRequest(BaseModel):
+    symbol: str
+    sec_type: str = "STK"
+    exchange: str = "SMART"
+    currency: str = "USD"
+    action: str                        # BUY or SELL
+    quantity: float
+    stop_loss_price: float             # Stop price for the STP child order
+    take_profit_price: float           # Limit price for the LMT child order
+    validate_only: bool = True         # SAFETY: True = dry-run by default
+
+
 # ─── App ─────────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -335,6 +355,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    """
+    Optional API key guard. Only active when IB_API_KEY env var is set.
+    /health and /market-status are always public (used by dashboards without auth).
+    All other endpoints require X-API-Key: <key> header.
+    """
+    if _API_KEY and request.url.path not in ("/health", "/market-status", "/docs", "/openapi.json"):
+        provided = request.headers.get("X-API-Key", "")
+        if not secrets.compare_digest(provided, _API_KEY):
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    return await call_next(request)
 
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
@@ -558,6 +592,101 @@ async def place_order(req: OrderRequest):
             "filled":        trade.orderStatus.filled,
             "remaining":     trade.orderStatus.remaining,
         }
+
+
+@app.post("/bracket-order")
+async def place_bracket_order(req: BracketOrderRequest):
+    """
+    Place a bracket order: market entry + native SL stop order + native TP limit order.
+    All three orders are linked via parentId so IB manages exits automatically.
+    validate_only=true (default) → dry-run only, no real orders sent.
+    validate_only=false          → REAL orders — use with care!
+    """
+    await ensure_connected()
+
+    action = req.action.upper()
+    if action not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail=f"Invalid action: {req.action}")
+
+    reverse_action = "SELL" if action == "BUY" else "BUY"
+
+    async def _execute():
+        contract = await _get_contract(req.symbol, req.sec_type, req.exchange, req.currency)
+        if contract is None:
+            return None
+
+        if req.validate_only:
+            # For dry-run: validate only the parent market order
+            parent = MarketOrder(action, req.quantity)
+            parent.whatIf = True
+            what_if = await ib.whatIfOrderAsync(contract, parent)
+            return {"what_if": what_if, "validate_only": True}
+
+        # Build the 3-order bracket using IB-assigned order IDs
+        parent = MarketOrder(action, req.quantity)
+        parent.orderId = ib.client.getReqId()
+        parent.transmit = False  # hold — don't send to exchange until all 3 are placed
+
+        take_profit = LimitOrder(reverse_action, req.quantity, round(req.take_profit_price, 2))
+        take_profit.orderId = ib.client.getReqId()
+        take_profit.parentId = parent.orderId
+        take_profit.transmit = False
+
+        stop_loss = StopOrder(reverse_action, req.quantity, round(req.stop_loss_price, 2))
+        stop_loss.orderId = ib.client.getReqId()
+        stop_loss.parentId = parent.orderId
+        stop_loss.transmit = True  # transmitting this one sends all 3 together
+
+        parent_trade = ib.placeOrder(contract, parent)
+        tp_trade = ib.placeOrder(contract, take_profit)
+        sl_trade = ib.placeOrder(contract, stop_loss)
+
+        # Wait up to 10s for parent to leave PendingSubmit
+        for _ in range(10):
+            await asyncio.sleep(1)
+            if parent_trade.orderStatus.status not in ("PendingSubmit", "PreSubmitted", ""):
+                break
+
+        return {
+            "validate_only": False,
+            "parent_order_id":     parent_trade.order.orderId,
+            "take_profit_order_id": tp_trade.order.orderId,
+            "stop_loss_order_id":  sl_trade.order.orderId,
+            "status":              parent_trade.orderStatus.status,
+        }
+
+    result = await _ib(_execute(), timeout=60)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Symbol {req.symbol} not found")
+
+    if req.validate_only:
+        wi = result["what_if"]
+        return {
+            "validate_only":      True,
+            "symbol":             req.symbol,
+            "action":             req.action,
+            "quantity":           req.quantity,
+            "stop_loss_price":    req.stop_loss_price,
+            "take_profit_price":  req.take_profit_price,
+            "init_margin":        wi.initMarginChange,
+            "maint_margin":       wi.maintMarginChange,
+            "equity_change":      wi.equityWithLoanChange,
+            "commission":         wi.commission,
+            "max_commission":     wi.maxCommission,
+        }
+
+    return {
+        "validate_only":        False,
+        "symbol":               req.symbol,
+        "action":               req.action,
+        "quantity":             req.quantity,
+        "stop_loss_price":      req.stop_loss_price,
+        "take_profit_price":    req.take_profit_price,
+        "parent_order_id":      result["parent_order_id"],
+        "take_profit_order_id": result["take_profit_order_id"],
+        "stop_loss_order_id":   result["stop_loss_order_id"],
+        "status":               result["status"],
+    }
 
 
 @app.delete("/order/{order_id}")

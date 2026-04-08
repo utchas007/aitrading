@@ -64,19 +64,13 @@ model Trade {
 }
 
 model PortfolioSnapshot {
-  id         Int      @id @default(autoincrement())
-  createdAt  DateTime @default(now())
-  totalValue Float
-  cadBalance Float    @default(0)
-  btcBalance Float    @default(0)
-  ethBalance Float    @default(0)
-  solBalance Float    @default(0)
-  ltcBalance Float    @default(0)
-  xrpBalance Float    @default(0)
-  otherValue Float    @default(0)
-  btcPrice   Float?
-  ethPrice   Float?
-  solPrice   Float?
+  id             Int      @id @default(autoincrement())
+  createdAt      DateTime @default(now())
+  totalValue     Float    // NetLiquidation (USD or CAD)
+  usdCash        Float?   // TotalCashValue_USD
+  unrealizedPnl  Float?   // UnrealizedPnL_USD
+  realizedPnl    Float?   // RealizedPnL_USD
+  buyingPower    Float?   // BuyingPower_USD
 
   @@index([createdAt])
 }

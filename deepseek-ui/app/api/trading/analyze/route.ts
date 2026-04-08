@@ -123,7 +123,8 @@ Format your response as JSON with these fields:
 }`;
 
     // Call DeepSeek AI for analysis
-    const aiResponse = await fetch('http://localhost:11434/api/generate', {
+    const ollamaUrl = process.env.OLLAMA_API_URL || 'http://localhost:11434';
+    const aiResponse = await fetch(`${ollamaUrl}/api/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -147,8 +148,13 @@ Format your response as JSON with these fields:
     let analysis;
 
     try {
-      // Try to parse JSON response from AI
-      const jsonMatch = aiData.response.match(/\{[\s\S]*\}/);
+      // DeepSeek R1 outputs <think>...</think> reasoning before the actual answer.
+      // Strip all think blocks first so the JSON regex doesn't match a { inside reasoning.
+      const cleanedResponse = (aiData.response as string)
+        .replace(/<think>[\s\S]*?<\/think>/gi, '')
+        .trim();
+
+      const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         analysis = JSON.parse(jsonMatch[0]);
       } else {

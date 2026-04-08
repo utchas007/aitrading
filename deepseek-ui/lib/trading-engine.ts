@@ -74,7 +74,11 @@ export interface ActivePosition {
   pnl: number;
   pnlPercent: number;
   timestamp: number;
-  dbTradeId?: number; // DB Trade.id for updating on close
+  dbTradeId?: number;         // DB Trade.id for updating on close
+  // Native IB bracket order IDs — set when autoExecute=true
+  parentOrderId?: number;     // Entry market order
+  slOrderId?: number;         // Stop-loss child order
+  tpOrderId?: number;         // Take-profit child order
 }
 
 export interface TradingEngineConfig {
@@ -147,9 +151,13 @@ export class TradingEngine {
 
     this.isRunning = true;
 
-    // Fast loop: check SL/TP every 30s independently of signal generation
+    // Recover any open positions from DB before starting the loops
+    // (handles restarts where activePositions Map was lost)
+    await this.recoverPositions();
+
+    // Fast loop: check SL/TP / detect IB-native closes every 30s
     this.positionIntervalId = setInterval(() => {
-      if (getMarketSession().isOpen) this.updatePositions();
+      this.updatePositions();
     }, 30_000);
 
     // Run initial market check, then repeat at checkInterval
@@ -241,12 +249,23 @@ export class TradingEngine {
         }
       }
 
+      // Fetch account balance once per cycle — passed to each generateSignal() call
+      let availableCash = 10000;
+      try {
+        const balance = await ib.getBalance();
+        const cashKey = Object.keys(balance).find(k => k.startsWith('AvailableFunds_'));
+        if (cashKey) availableCash = parseFloat(balance[cashKey]);
+        logActivity.info(`💵 Available cash: $${availableCash.toLocaleString()}`);
+      } catch {
+        logActivity.warning('Could not fetch IB balance — using $10,000 fallback for position sizing');
+      }
+
       // Check each trading pair — 12s delay between analysis cycles to respect IB OHLC pacing
       for (const pair of this.config.pairs) {
         try {
           logActivity.analyzing(`Analyzing ${pair}...`);
           await new Promise(r => setTimeout(r, 12000));
-          const signal = await this.generateSignal(pair, marketData);
+          const signal = await this.generateSignal(pair, marketData, availableCash);
           
           // Log the signal details
           logActivity.calculating(`${pair}: RSI ${signal.technicalSignals.rsi.toFixed(1)}, MACD ${signal.technicalSignals.macd.trend}, Confidence ${signal.confidence}%`);
@@ -303,8 +322,9 @@ export class TradingEngine {
    * Fetch news from World Monitor
    */
   private async fetchWorldMonitorNews(): Promise<any[]> {
+    const worldMonitorUrl = process.env.WORLDMONITOR_URL || 'http://localhost:3000';
     try {
-      const response = await fetch('http://192.168.2.232:3000/api/worldmonitor/news');
+      const response = await fetch(`${worldMonitorUrl}/api/worldmonitor/news`);
       if (!response.ok) {
         console.warn('Failed to fetch World Monitor news, continuing with technical analysis only');
         return [];
@@ -353,7 +373,7 @@ export class TradingEngine {
   /**
    * Generate trading signal for a pair
    */
-  async generateSignal(pair: string, marketData: Record<string, { price: number; volume: number; change24h: string }>): Promise<TradeSignal> {
+  async generateSignal(pair: string, marketData: Record<string, { price: number; volume: number; change24h: string }>, availableCash: number = 10000): Promise<TradeSignal> {
     // Use daily bars — reliable, no IB pacing issues, good for swing trading signals
     const priceData = await getHistoricalPrices(pair, 1440);
 
@@ -519,13 +539,7 @@ export class TradingEngine {
     }
 
     // ── Step 5: Fee-aware position sizing via ATR ─────────────────────────────
-    const ib = createIBClient();
-    let availableCash = 10000;
-    try {
-      const balance = await ib.getBalance();
-      const cashKey = Object.keys(balance).find(k => k.startsWith('AvailableFunds_'));
-      if (cashKey) availableCash = parseFloat(balance[cashKey]);
-    } catch { /* use fallback */ }
+    // availableCash is passed in from checkMarkets() — fetched once per cycle, not per pair
 
     const vixMultiplier = marketSentiment?.vix.positionSizeMultiplier ?? 1.0;
     const earningsRisk = marketSentiment?.earnings.riskLevel ?? 'safe';
@@ -660,34 +674,52 @@ export class TradingEngine {
         logActivity.info(`✅ IB position found: ${pos.position} shares of ${signal.pair}`);
       }
 
-      // Place order via IB (validate_only=true in paper mode, false when live)
-      const result = await ib.placeOrder({
-        symbol:        signal.pair,
-        action:        signal.action === 'buy' ? 'BUY' : 'SELL',
-        quantity:      signal.positionSize,
-        order_type:    'MKT',
-        validate_only: !this.config.autoExecute,
-      });
+      let posId: string;
+      let parentOrderId: number | undefined;
+      let slOrderId: number | undefined;
+      let tpOrderId: number | undefined;
 
-      if (this.config.autoExecute && result.order_id) {
-        logActivity.completed(`✅ ${signal.action.toUpperCase()} ${signal.positionSize} ${signal.pair} at $${signal.entryPrice.toFixed(2)} | OrderID: ${result.order_id}`);
-        logActivity.info(`🛡️ Stop-loss: $${signal.stopLoss.toFixed(2)} | 🎯 Take-profit: $${signal.takeProfit.toFixed(2)}`);
+      if (this.config.autoExecute) {
+        // Live mode: place a bracket order so IB manages SL/TP natively.
+        // This survives any process restart — exits are on IB's servers.
+        const bracket = await ib.placeBracketOrder({
+          symbol:           signal.pair,
+          action:           signal.action === 'buy' ? 'BUY' : 'SELL',
+          quantity:         signal.positionSize,
+          stop_loss_price:  signal.stopLoss,
+          take_profit_price: signal.takeProfit,
+          validate_only:    false,
+        });
+
+        parentOrderId = bracket.parent_order_id;
+        slOrderId     = bracket.stop_loss_order_id;
+        tpOrderId     = bracket.take_profit_order_id;
+        posId         = bracket.parent_order_id?.toString() ?? `${signal.pair}-${Date.now()}`;
+
+        logActivity.completed(`✅ ${signal.action.toUpperCase()} ${signal.positionSize} ${signal.pair} at $${signal.entryPrice.toFixed(2)} | OrderID: ${parentOrderId}`);
+        logActivity.info(`🛡️ Stop-loss order #${slOrderId}: $${signal.stopLoss.toFixed(2)} | 🎯 Take-profit order #${tpOrderId}: $${signal.takeProfit.toFixed(2)} (native IB bracket)`);
         this.lastTradeTime.set(signal.pair, Date.now());
         this.dailyTradeCount++;
         logActivity.info(`📊 Daily trades: ${this.dailyTradeCount}/${this.config.maxDailyTrades}`);
         saveNotification(
           'trade_executed',
           `${signal.action.toUpperCase()} ${signal.pair}`,
-          `${signal.positionSize} shares at $${signal.entryPrice.toFixed(2)} | OrderID: ${result.order_id} | SL: $${signal.stopLoss.toFixed(2)} TP: $${signal.takeProfit.toFixed(2)}`,
+          `${signal.positionSize} shares at $${signal.entryPrice.toFixed(2)} | OrderID: ${parentOrderId} | SL: $${signal.stopLoss.toFixed(2)} TP: $${signal.takeProfit.toFixed(2)}`,
           signal.pair,
         );
       } else {
+        // Paper/validation mode: validate the parent order only (what-if check).
+        const result = await ib.placeOrder({
+          symbol:        signal.pair,
+          action:        signal.action === 'buy' ? 'BUY' : 'SELL',
+          quantity:      signal.positionSize,
+          order_type:    'MKT',
+          validate_only: true,
+        });
+        posId = `${signal.pair}-${Date.now()}`;
         logActivity.completed(`✅ Order validated (paper mode) — would ${signal.action.toUpperCase()} ${signal.positionSize} shares of ${signal.pair} at $${signal.entryPrice.toFixed(2)}`);
         if (result.commission) logActivity.info(`💰 Estimated commission: $${result.commission}`);
       }
-
-      // Track position locally and persist to DB
-      const posId = result.order_id?.toString() ?? `${signal.pair}-${Date.now()}`;
 
       // Save open trade to DB (fire-and-forget, non-blocking)
       let dbTradeId: number | undefined;
@@ -713,18 +745,21 @@ export class TradingEngine {
       }
 
       this.activePositions.set(posId, {
-        txid:         posId,
-        pair:         signal.pair,
-        type:         signal.action,
-        entryPrice:   signal.entryPrice,
-        volume:       signal.positionSize,
-        stopLoss:     signal.stopLoss,
-        takeProfit:   signal.takeProfit,
-        currentPrice: signal.entryPrice,
-        pnl:          0,
-        pnlPercent:   0,
-        timestamp:    signal.timestamp,
+        txid:          posId,
+        pair:          signal.pair,
+        type:          signal.action,
+        entryPrice:    signal.entryPrice,
+        volume:        signal.positionSize,
+        stopLoss:      signal.stopLoss,
+        takeProfit:    signal.takeProfit,
+        currentPrice:  signal.entryPrice,
+        pnl:           0,
+        pnlPercent:    0,
+        timestamp:     signal.timestamp,
         dbTradeId,
+        parentOrderId,
+        slOrderId,
+        tpOrderId,
       });
     } catch (error: any) {
       console.error(`❌ Failed to execute order:`, error.message);
@@ -739,7 +774,14 @@ export class TradingEngine {
   }
 
   /**
-   * Update active positions and check for stop-loss/take-profit
+   * Update active positions: refresh P&L from live prices and detect IB-native closes.
+   *
+   * When autoExecute=true, SL/TP are native IB bracket orders — IB closes the position
+   * automatically. We detect this by checking whether IB still holds shares. If the
+   * IB position is gone, the bracket order fired and we update the DB accordingly.
+   *
+   * For paper mode (autoExecute=false) we still do the manual shouldClosePosition check
+   * since no real IB orders exist to monitor.
    */
   private async updatePositions(): Promise<void> {
     if (this.activePositions.size === 0) return;
@@ -747,41 +789,84 @@ export class TradingEngine {
     try {
       const ib = createIBClient();
 
-      for (const [txid, position] of this.activePositions) {
-        // Get current price via IB
-        const ticker = await ib.getTicker(position.pair);
-        const currentPrice = ticker.last ?? ticker.close ?? position.currentPrice;
+      // Fetch IB positions once for all symbols (used to detect native bracket closes)
+      let ibPositions: Awaited<ReturnType<typeof ib.getPositions>> = [];
+      if (this.config.autoExecute) {
+        try {
+          ibPositions = await ib.getPositions();
+        } catch {
+          // Non-fatal; P&L update continues without close detection this cycle
+        }
+      }
 
-        // Update position
-        position.currentPrice = currentPrice;
-        
-        if (position.type === 'buy') {
-          position.pnl = (currentPrice - position.entryPrice) * position.volume;
-          position.pnlPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
-        } else {
-          position.pnl = (position.entryPrice - currentPrice) * position.volume;
-          position.pnlPercent = ((position.entryPrice - currentPrice) / position.entryPrice) * 100;
+      for (const [txid, position] of this.activePositions) {
+        // Update current price and P&L
+        try {
+          const ticker = await ib.getTicker(position.pair);
+          const currentPrice = ticker.last ?? ticker.close ?? position.currentPrice;
+          position.currentPrice = currentPrice;
+
+          if (position.type === 'buy') {
+            position.pnl        = (currentPrice - position.entryPrice) * position.volume;
+            position.pnlPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+          } else {
+            position.pnl        = (position.entryPrice - currentPrice) * position.volume;
+            position.pnlPercent = ((position.entryPrice - currentPrice) / position.entryPrice) * 100;
+          }
+        } catch {
+          // Price fetch failed; keep previous values and continue
         }
 
-        // Check stop-loss and take-profit
-        const shouldClose = this.riskManager.shouldClosePosition({
-          pair: position.pair,
-          type: position.type,
-          entryPrice: position.entryPrice,
-          volume: position.volume,
-          stopLoss: position.stopLoss,
-          takeProfit: position.takeProfit,
-          currentPrice: position.currentPrice,
-        });
+        if (this.config.autoExecute) {
+          // ── Native bracket mode: detect close by checking IB position ──────
+          const ibPos = ibPositions.find(p => p.symbol === position.pair && p.position > 0);
+          if (!ibPos) {
+            // IB no longer holds shares → bracket SL or TP fired
+            const closeReason = position.pnl >= 0 ? 'take_profit' : 'stop_loss';
+            console.log(`\n🔔 IB bracket closed ${position.pair} (${closeReason}) | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%)`);
+            logActivity.completed(`✅ Position closed by IB — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${closeReason}`);
+            saveNotification(
+              'trade_closed',
+              `Position Closed — ${position.pair}`,
+              `${closeReason.replace('_', ' ')} hit | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%)`,
+              position.pair,
+            );
 
-        if (shouldClose.shouldClose) {
-          console.log(`\n🔔 ${shouldClose.reason?.toUpperCase()} triggered for ${position.pair}`);
-          console.log(`   Entry: $${position.entryPrice.toFixed(2)}`);
-          console.log(`   Current: $${currentPrice.toFixed(2)}`);
-          console.log(`   P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%)`);
+            if (position.dbTradeId) {
+              import('./db').then(({ prisma }) =>
+                prisma.trade.update({
+                  where: { id: position.dbTradeId },
+                  data: {
+                    exitPrice:   position.currentPrice,
+                    pnl:         position.pnl,
+                    pnlPercent:  position.pnlPercent,
+                    status:      'closed',
+                    closedAt:    new Date(),
+                    closeReason,
+                  },
+                })
+              ).catch(e => console.error('[DB] Failed to update trade on close:', e));
+            }
 
-          if (this.config.autoExecute) {
-            await this.closePosition(txid, shouldClose.reason ?? 'manual');
+            this.activePositions.delete(txid);
+          }
+        } else {
+          // ── Paper mode: manual SL/TP check (no native orders) ─────────────
+          const shouldClose = this.riskManager.shouldClosePosition({
+            pair:         position.pair,
+            type:         position.type,
+            entryPrice:   position.entryPrice,
+            volume:       position.volume,
+            stopLoss:     position.stopLoss,
+            takeProfit:   position.takeProfit,
+            currentPrice: position.currentPrice,
+          });
+
+          if (shouldClose.shouldClose) {
+            console.log(`\n🔔 ${shouldClose.reason?.toUpperCase()} triggered (paper) for ${position.pair}`);
+            console.log(`   Entry: $${position.entryPrice.toFixed(2)} | Current: $${position.currentPrice.toFixed(2)} | P&L: $${position.pnl.toFixed(2)}`);
+            logActivity.completed(`✅ Paper position closed — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${shouldClose.reason}`);
+            this.activePositions.delete(txid);
           }
         }
       }
@@ -791,50 +876,80 @@ export class TradingEngine {
   }
 
   /**
-   * Close a position
+   * Recover open positions from the database on startup.
+   *
+   * Cross-references DB open trades with actual IB positions:
+   * - If IB still holds shares → restore to activePositions (bracket orders are still live on IB)
+   * - If IB no longer holds shares → the position closed while the bot was offline; mark it closed
    */
-  private async closePosition(txid: string, closeReason = 'manual'): Promise<void> {
-    const position = this.activePositions.get(txid);
-    if (!position) return;
-
+  async recoverPositions(): Promise<void> {
     try {
+      const { prisma } = await import('./db');
+      const openTrades = await prisma.trade.findMany({ where: { status: 'open' } });
+
+      if (openTrades.length === 0) return;
+
+      logActivity.info(`🔄 Found ${openTrades.length} open trade(s) in DB — verifying with IB...`);
+
       const ib = createIBClient();
-
-      // Place opposite order to close position
-      const closeAction = position.type === 'buy' ? 'SELL' : 'BUY';
-      await ib.placeOrder({
-        symbol:        position.pair,
-        action:        closeAction,
-        quantity:      position.volume,
-        order_type:    'MKT',
-        validate_only: !this.config.autoExecute,
-      });
-
-      console.log(`✅ Position closed successfully`);
-      console.log(`   Final P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%)`);
-      logActivity.completed(`✅ Position closed — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${closeReason}`);
-
-      // Update trade record in DB
-      if (position.dbTradeId) {
-        import('./db').then(({ prisma }) =>
-          prisma.trade.update({
-            where: { id: position.dbTradeId },
-            data: {
-              exitPrice:   position.currentPrice,
-              pnl:         position.pnl,
-              pnlPercent:  position.pnlPercent,
-              status:      'closed',
-              closedAt:    new Date(),
-              closeReason,
-            },
-          })
-        ).catch(e => console.error('[DB] Failed to update trade on close:', e));
+      let ibPositions: Awaited<ReturnType<typeof ib.getPositions>> = [];
+      try {
+        ibPositions = await ib.getPositions();
+      } catch {
+        logActivity.warning('Position recovery: cannot reach IB. Will retry on next update cycle.');
+        return;
       }
 
-      // Remove from active positions
-      this.activePositions.delete(txid);
-    } catch (error: any) {
-      console.error(`❌ Failed to close position:`, error.message);
+      let recovered = 0;
+      let markedClosed = 0;
+
+      for (const trade of openTrades) {
+        const ibPos = ibPositions.find(p => p.symbol === trade.pair && p.position > 0);
+
+        if (ibPos) {
+          // IB confirms shares are still held — restore to activePositions
+          const posId = trade.txid ?? `${trade.pair}-${trade.id}`;
+          this.activePositions.set(posId, {
+            txid:          posId,
+            pair:          trade.pair,
+            type:          trade.type as 'buy' | 'sell',
+            entryPrice:    trade.entryPrice,
+            volume:        ibPos.position, // use IB's actual fill quantity
+            stopLoss:      trade.stopLoss,
+            takeProfit:    trade.takeProfit,
+            currentPrice:  trade.entryPrice, // will refresh on next updatePositions cycle
+            pnl:           0,
+            pnlPercent:    0,
+            timestamp:     trade.createdAt.getTime(),
+            dbTradeId:     trade.id,
+            // txid is the parentOrderId string from when the bracket order was placed
+            parentOrderId: trade.txid ? (parseInt(trade.txid) || undefined) : undefined,
+          });
+          recovered++;
+          logActivity.info(`✅ Recovered: ${trade.pair} | ${ibPos.position} shares @ $${trade.entryPrice.toFixed(2)} | SL: $${trade.stopLoss.toFixed(2)} TP: $${trade.takeProfit.toFixed(2)} | IB bracket still active`);
+        } else {
+          // IB no longer holds shares — closed while bot was offline
+          logActivity.warning(`⚠️ ${trade.pair} trade #${trade.id} not in IB positions — marking closed (offline close)`);
+          await prisma.trade.update({
+            where: { id: trade.id },
+            data: {
+              status:      'closed',
+              closedAt:    new Date(),
+              closeReason: 'closed_while_offline',
+            },
+          });
+          markedClosed++;
+        }
+      }
+
+      if (recovered > 0 || markedClosed > 0) {
+        logActivity.info(`🔄 Recovery complete: ${recovered} position(s) restored, ${markedClosed} marked closed (offline)`);
+        if (recovered > 0) {
+          logActivity.info('ℹ️  Native IB bracket orders are still active — SL/TP protection is intact');
+        }
+      }
+    } catch (err) {
+      logActivity.error(`Position recovery failed: ${err}`);
     }
   }
 

@@ -26,13 +26,20 @@ let engineRecoveryAttempted = false;
 async function recoverBotIfNeeded() {
   if (engineRecoveryAttempted) return;
   engineRecoveryAttempted = true;
-  
+
+  // If standalone bot is already alive, don't start a second in-process instance
+  const standaloneAlive = await tryStandaloneBot('/status');
+  if (standaloneAlive?.ok) {
+    console.log('[Bot Recovery] Standalone bot is running — skipping in-process recovery');
+    return;
+  }
+
   const { should, config } = await shouldBotBeRunning();
   if (should && config && !engineInstance) {
     console.log('[Bot Recovery] Restarting bot that was running before server restart...');
     engineInstance = createTradingEngine({
       pairs:             config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
-      autoExecute:       config.autoExecute ?? true,
+      autoExecute:       config.autoExecute ?? false, // default to paper mode on recovery; only live if explicitly saved
       minConfidence:     config.minConfidence ?? 75,
       maxPositions:      config.maxPositions ?? 5,
       riskPerTrade:      config.riskPerTrade ?? 0.05,
@@ -62,8 +69,13 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({ action }),
     });
     if (botRes?.ok) {
+      // Standalone accepted the command — stop any in-process instance to prevent duplicates
+      if (engineInstance) {
+        console.log('[Engine Route] Standalone bot took over — stopping in-process engine to prevent duplicate');
+        engineInstance.stop();
+        engineInstance = null;
+      }
       const data = await botRes.json();
-      // Get status from standalone bot
       const statusRes = await tryStandaloneBot('/status');
       const statusData = statusRes?.ok ? await statusRes.json() : {};
       return NextResponse.json({ ...data, status: statusData.status, activities: statusData.activities });
@@ -71,13 +83,19 @@ export async function POST(req: NextRequest) {
 
     // Fallback to in-process engine
     if (action === 'start') {
+      // Refuse to start in-process if standalone bot is alive — prevents duplicate instances
+      const standaloneAlive = await tryStandaloneBot('/status');
+      if (standaloneAlive?.ok) {
+        return NextResponse.json({ success: false, error: 'Standalone bot is already running on port 3002. Stop it first.' }, { status: 409 });
+      }
+
       if (engineInstance?.getStatus().isRunning) {
         return NextResponse.json({ success: false, error: 'Engine is already running' });
       }
 
       const botConfig = {
         pairs:             config?.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
-        autoExecute:       config?.autoExecute ?? true,
+        autoExecute:       config?.autoExecute ?? false, // default to paper mode; user must explicitly enable live trading
         minConfidence:     config?.minConfidence ?? 75,
         maxPositions:      config?.maxPositions ?? 5,
         riskPerTrade:      config?.riskPerTrade ?? 0.05,

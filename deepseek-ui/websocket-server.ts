@@ -27,7 +27,11 @@ const latestData: {
   ibHealth: null,
 };
 
-const WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'JPM', 'META', 'XOM', 'AMD'];
+// Fallback symbols used when the bot is not running or config is unavailable
+const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'JPM', 'META', 'XOM', 'AMD'];
+
+// Dynamic watchlist — updated each poll cycle from the bot's configured pairs
+let currentWatchlist: string[] = [...DEFAULT_WATCHLIST];
 
 async function fetchWithTimeout(url: string, timeout = 5000): Promise<any> {
   const controller = new AbortController();
@@ -49,7 +53,7 @@ async function fetchAndBroadcast(io: SocketIOServer) {
 
   try {
     const [pricesRes, balanceRes, positionsRes, engineRes, healthRes] = await Promise.all([
-      fetchWithTimeout(`${baseUrl}/api/stocks/ticker?symbols=${WATCHLIST.join(',')}`),
+      fetchWithTimeout(`${baseUrl}/api/stocks/ticker?symbols=${currentWatchlist.join(',')}`),
       fetchWithTimeout(`${ibUrl}/balance`),
       fetchWithTimeout(`${ibUrl}/positions`),
       fetchWithTimeout(`${baseUrl}/api/trading/engine`),
@@ -88,6 +92,17 @@ async function fetchAndBroadcast(io: SocketIOServer) {
     if (engineRes?.success) {
       const status = engineRes.status;
       const activities = engineRes.activities || [];
+
+      // Sync watchlist with bot's configured pairs
+      const botPairs: string[] | undefined = status?.config?.pairs;
+      if (botPairs && botPairs.length > 0) {
+        const joined = botPairs.slice().sort().join(',');
+        const current = currentWatchlist.slice().sort().join(',');
+        if (joined !== current) {
+          currentWatchlist = botPairs;
+          console.log(`[WS] Watchlist updated from bot config: ${botPairs.join(', ')}`);
+        }
+      }
 
       if (JSON.stringify(status) !== JSON.stringify(latestData.botStatus)) {
         latestData.botStatus = status;
@@ -157,6 +172,6 @@ httpServer.listen(PORT, () => {
   console.log('================================================');
   console.log(`  URL: ws://localhost:${PORT}`);
   console.log(`  Poll interval: ${POLL_INTERVAL}ms`);
-  console.log(`  Watchlist: ${WATCHLIST.join(', ')}`);
+  console.log(`  Watchlist: ${currentWatchlist.join(', ')} (syncs with bot config)`);
   console.log('================================================');
 });

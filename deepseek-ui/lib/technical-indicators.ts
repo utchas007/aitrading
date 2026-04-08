@@ -93,29 +93,55 @@ export function calculateEMA(prices: number[], period: number): number {
 
 /**
  * Calculate MACD (Moving Average Convergence Divergence)
+ *
+ * O(n) single-pass implementation using incremental EMA state.
+ * The previous version recomputed full EMA12/EMA26 from scratch on every
+ * iteration of the signal loop, making it O(n²) and producing a slightly
+ * inaccurate signal line because each inner EMA didn't share state with
+ * the outer one.
  */
 export function calculateMACD(prices: number[]): {
   macd: number;
   signal: number;
   histogram: number;
 } {
-  const ema12 = calculateEMA(prices, 12);
-  const ema26 = calculateEMA(prices, 26);
-  const macd = ema12 - ema26;
+  if (prices.length < 26) return { macd: 0, signal: 0, histogram: 0 };
 
-  // Calculate signal line (9-period EMA of MACD)
-  const macdValues: number[] = [];
-  for (let i = 26; i < prices.length; i++) {
-    const slice = prices.slice(0, i + 1);
-    const e12 = calculateEMA(slice, 12);
-    const e26 = calculateEMA(slice, 26);
-    macdValues.push(e12 - e26);
+  const k12 = 2 / (12 + 1);
+  const k26 = 2 / (26 + 1);
+  const k9  = 2 / (9 + 1);
+
+  // Seed EMA12 with SMA of first 12 prices, then bring it up to index 25
+  let ema12 = prices.slice(0, 12).reduce((a, b) => a + b) / 12;
+  for (let i = 12; i <= 25; i++) {
+    ema12 = (prices[i] - ema12) * k12 + ema12;
   }
 
-  const signal = calculateEMA(macdValues, 9);
-  const histogram = macd - signal;
+  // Seed EMA26 with SMA of first 26 prices (index 0–25)
+  let ema26 = prices.slice(0, 26).reduce((a, b) => a + b) / 26;
 
-  return { macd, signal, histogram };
+  // Both EMAs are now at index 25 — collect MACD values in a single forward pass
+  const macdValues: number[] = [ema12 - ema26];
+  for (let i = 26; i < prices.length; i++) {
+    ema12 = (prices[i] - ema12) * k12 + ema12;
+    ema26 = (prices[i] - ema26) * k26 + ema26;
+    macdValues.push(ema12 - ema26);
+  }
+
+  const macd = macdValues[macdValues.length - 1];
+
+  // Signal line: 9-period EMA of macdValues
+  let signal: number;
+  if (macdValues.length < 9) {
+    signal = macdValues.reduce((a, b) => a + b) / macdValues.length;
+  } else {
+    signal = macdValues.slice(0, 9).reduce((a, b) => a + b) / 9;
+    for (let i = 9; i < macdValues.length; i++) {
+      signal = (macdValues[i] - signal) * k9 + signal;
+    }
+  }
+
+  return { macd, signal, histogram: macd - signal };
 }
 
 /**

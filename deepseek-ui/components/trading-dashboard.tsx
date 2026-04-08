@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useToast } from "@/contexts/ToastContext";
 import AnalysisPanel from "./analysis-panel";
 import TradingChart from "./trading-chart";
 import PortfolioChart from "./portfolio-chart";
@@ -33,43 +34,32 @@ interface NewsItem {
   category?: string;
 }
 
-interface TradingSignal {
-  sentiment: string;
-  confidence: number;
-  signal: string;
-  keyFactors: string[];
-  risks: string[];
-  recommendation: string;
-  entryPrice: string | null;
-  exitPrice: string | null;
-  stopLoss: string | null;
-}
 
 const DEFAULT_STOCKS = ['AAPL', 'MSFT', 'NVDA', 'TSLA'];
 
 export default function TradingDashboard() {
   // WebSocket real-time data
+  const { addToast } = useToast();
   const {
     prices: wsPrices,
     balance: wsBalance,
     positions: wsPositions,
     botStatus: wsBotStatus,
     ibHealth: wsIbHealth,
-    connected: wsConnected,
-    lastUpdate: wsLastUpdate,
   } = useWebSocketContext();
 
   const [stocks, setStocks] = useState<string[]>(DEFAULT_STOCKS);
   const [balance, setBalance] = useState<any>(null);
   const [marketData, setMarketData] = useState<MarketData | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
-  const [signal, setSignal] = useState<TradingSignal | null>(null);
-  const [, setLoading] = useState(false);
   const [selectedPair, setSelectedPair] = useState('AAPL');
-  const [analyzing, setAnalyzing] = useState(false);
-  const [openOrders, setOpenOrders] = useState<any[]>([]);
-  const [executing, setExecuting] = useState(false);
-  const [tradeAmount, setTradeAmount] = useState('');
+  const [openOrders, setOpenOrders] = useState<Array<{
+    order_id: number; symbol: string; action: string;
+    quantity: number; order_type: string; limit_price: number | null;
+    status: string; filled: number; remaining: number;
+  }>>([]);
+  const [cancellingOrderId, setCancellingOrderId] = useState<number | null>(null);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [connectionStatus, setConnectionStatus] = useState<{
     ib: boolean;
     ibAccount: string | null;
@@ -268,6 +258,32 @@ export default function TradingDashboard() {
     }
   };
 
+  // Fetch open IB orders
+  const fetchOpenOrders = async () => {
+    try {
+      const res = await fetch('/api/ib/orders');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.orders)) {
+        setOpenOrders(data.orders.filter((o: any) =>
+          !['Filled', 'Cancelled', 'Inactive'].includes(o.status)
+        ));
+      }
+    } catch {}
+  };
+
+  // Cancel an IB order
+  const cancelOrder = async (orderId: number) => {
+    setCancellingOrderId(orderId);
+    try {
+      await fetch(`/api/ib/orders?orderId=${orderId}`, { method: 'DELETE' });
+      await fetchOpenOrders();
+    } catch (e) {
+      addToast('Failed to cancel order', 'error');
+    } finally {
+      setCancellingOrderId(null);
+    }
+  };
+
   // Fetch news
   const fetchNews = async () => {
     try {
@@ -282,43 +298,9 @@ export default function TradingDashboard() {
     }
   };
 
-  // Analyze trading signal
-  const analyzeSignal = async () => {
-    if (!marketData || news.length === 0) return;
-
-    setAnalyzing(true);
-    try {
-      const formattedMarketData: any = {};
-      Object.entries(marketData).forEach(([symbol, ticker]) => {
-        formattedMarketData[symbol] = {
-          price: ticker.last ?? ticker.close ?? 0,
-          volume: ticker.volume ?? 0,
-        };
-      });
-
-      const res = await fetch('/api/trading/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          news: news.slice(0, 10),
-          marketData: formattedMarketData,
-          pair: selectedPair,
-        }),
-      });
-
-      const data = await res.json();
-      if (data.success) {
-        setSignal(data.analysis);
-      }
-    } catch (error) {
-      console.error('Failed to analyze signal:', error);
-    }
-    setAnalyzing(false);
-  };
 
   // Initial load — all fetches in parallel; engine stocks updates the list when ready
   useEffect(() => {
-    setLoading(true);
     Promise.all([
       fetchEngineStocks(),
       fetchIBStatus(),
@@ -326,28 +308,23 @@ export default function TradingDashboard() {
       fetchMarketData(),
       fetchNews(),
       fetchWorldMonitorStatus(),
-    ]).finally(() => setLoading(false));
+      fetchOpenOrders(),
+    ]).finally(() => setIsInitialLoading(false));
+
+    // Refresh open orders every 15 seconds
+    const ordersInterval = setInterval(fetchOpenOrders, 15000);
 
     // Refresh news and World Monitor status every 60 seconds
-    const interval = setInterval(() => {
+    const newsInterval = setInterval(() => {
       fetchNews();
       fetchWorldMonitorStatus();
     }, 60000);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(ordersInterval);
+      clearInterval(newsInterval);
+    };
   }, []);
-
-  const getSignalColor = (signal: string) => {
-    if (signal === 'BUY') return '#00ff9f';
-    if (signal === 'SELL') return '#ff4d6d';
-    return '#ffd60a';
-  };
-
-  const getSentimentColor = (sentiment: string) => {
-    if (sentiment === 'Bullish') return '#00ff9f';
-    if (sentiment === 'Bearish') return '#ff4d6d';
-    return '#888';
-  };
 
   const getPrice = (ticker: IBTicker): number => ticker.last ?? ticker.close ?? 0;
 
@@ -361,12 +338,20 @@ export default function TradingDashboard() {
       overflow: "auto",
     }}>
       <style>{`
-        @media (max-width: 1200px) {
-          .dashboard-grid { grid-template-columns: 1fr !important; }
-        }
+        @media (max-width: 1200px) { .dashboard-grid { grid-template-columns: 1fr !important; } }
         @media (max-width: 768px) {
           .dashboard-header { flex-direction: column !important; align-items: flex-start !important; }
           .dashboard-header h1 { font-size: 24px !important; }
+        }
+        @keyframes shimmer {
+          0%   { background-position: 200% 0; }
+          100% { background-position: -200% 0; }
+        }
+        .skeleton {
+          background: linear-gradient(90deg, #1a1a2e 25%, #252540 50%, #1a1a2e 75%);
+          background-size: 200% 100%;
+          animation: shimmer 1.5s infinite;
+          border-radius: 4px;
         }
       `}</style>
       <div style={{ maxWidth: 1600, margin: '0 auto', width: '100%' }}>
@@ -552,31 +537,43 @@ export default function TradingDashboard() {
           {stocks.map((symbol: string) => {
             const ticker = marketData?.[symbol];
             const price = ticker ? getPrice(ticker) : null;
+            const loading = isInitialLoading && price == null;
             return (
               <div key={symbol} style={{
                 background: '#0a0a14',
-                border: '1px solid #1a1a2e',
+                border: `1px solid ${selectedPair === symbol ? '#00ff9f' : '#1a1a2e'}`,
                 borderRadius: 12,
                 padding: 16,
                 cursor: 'pointer',
                 transition: 'all 0.2s',
-                borderColor: selectedPair === symbol ? '#00ff9f' : '#1a1a2e',
               }} onClick={() => setSelectedPair(symbol)}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ fontSize: 11, color: '#666' }}>{symbol}</span>
-                  {ticker?.source === 'yahoo' && <span style={{ fontSize: 9, color: '#444', background: '#1a1a2e', padding: '2px 6px', borderRadius: 4 }}>YAHOO</span>}
+                  {!loading && ticker?.source === 'yahoo' && <span style={{ fontSize: 9, color: '#444', background: '#1a1a2e', padding: '2px 6px', borderRadius: 4 }}>YAHOO</span>}
                 </div>
-                <div style={{ fontSize: 24, fontWeight: 700, color: '#fff', marginBottom: 4 }}>
-                  {price != null ? `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                  <span style={{ color: '#666' }}>Vol: {ticker?.volume != null ? (ticker.volume / 1e6).toFixed(1) + 'M' : '—'}</span>
-                  {ticker?.change && (
-                    <span style={{ color: parseFloat(ticker.change) >= 0 ? '#00ff9f' : '#ff4d6d', fontWeight: 600 }}>
-                      {parseFloat(ticker.change) >= 0 ? '▲' : '▼'} {Math.abs(parseFloat(ticker.change)).toFixed(2)}%
-                    </span>
-                  )}
-                </div>
+                {loading ? (
+                  <>
+                    <div className="skeleton" style={{ width: '60%', height: 28, marginBottom: 8 }} />
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <div className="skeleton" style={{ width: '35%', height: 14 }} />
+                      <div className="skeleton" style={{ width: '25%', height: 14 }} />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: '#fff', marginBottom: 4 }}>
+                      {price != null ? `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                      <span style={{ color: '#666' }}>Vol: {ticker?.volume != null ? (ticker.volume / 1e6).toFixed(1) + 'M' : '—'}</span>
+                      {ticker?.change && (
+                        <span style={{ color: parseFloat(ticker.change) >= 0 ? '#00ff9f' : '#ff4d6d', fontWeight: 600 }}>
+                          {parseFloat(ticker.change) >= 0 ? '▲' : '▼'} {Math.abs(parseFloat(ticker.change)).toFixed(2)}%
+                        </span>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             );
           })}
@@ -655,6 +652,64 @@ export default function TradingDashboard() {
                   })}
                 </div>
 
+                {/* Open Orders */}
+                {openOrders.length > 0 && (
+                  <div style={{ marginTop: 20 }}>
+                    <div style={{ fontSize: 12, color: '#666', marginBottom: 12 }}>OPEN ORDERS</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {openOrders.map(order => (
+                        <div key={order.order_id} style={{
+                          padding: '10px 12px',
+                          background: '#0d0d1e',
+                          borderRadius: 8,
+                          border: '1px solid #1a1a2e',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 8,
+                        }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                              <span style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>{order.symbol}</span>
+                              <span style={{
+                                fontSize: 10, padding: '2px 6px', borderRadius: 4, fontWeight: 700,
+                                background: order.action === 'BUY' ? '#00ff9f15' : '#ff4d6d15',
+                                color: order.action === 'BUY' ? '#00ff9f' : '#ff4d6d',
+                                border: `1px solid ${order.action === 'BUY' ? '#00ff9f44' : '#ff4d6d44'}`,
+                              }}>{order.action}</span>
+                              <span style={{ fontSize: 10, color: '#666' }}>{order.order_type}</span>
+                            </div>
+                            <div style={{ fontSize: 11, color: '#555' }}>
+                              {order.quantity} shares
+                              {order.limit_price != null && ` @ $${order.limit_price.toFixed(2)}`}
+                              {' · '}{order.filled}/{order.quantity} filled
+                              {' · '}<span style={{ color: '#ffd60a' }}>{order.status}</span>
+                              {' · '}ID #{order.order_id}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => cancelOrder(order.order_id)}
+                            disabled={cancellingOrderId === order.order_id}
+                            style={{
+                              padding: '5px 10px',
+                              background: '#2a0a0a',
+                              border: '1px solid #ff4d6d44',
+                              borderRadius: 6,
+                              color: '#ff4d6d',
+                              fontSize: 11,
+                              cursor: cancellingOrderId === order.order_id ? 'not-allowed' : 'pointer',
+                              opacity: cancellingOrderId === order.order_id ? 0.5 : 1,
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {cancellingOrderId === order.order_id ? '...' : '✕ Cancel'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Open Positions */}
                 {wsPositions && wsPositions.length > 0 && (
                   <div style={{ marginTop: 20 }}>
@@ -706,9 +761,17 @@ export default function TradingDashboard() {
                   </div>
                 )}
               </>
+            ) : isInitialLoading ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div className="skeleton" style={{ height: 88, borderRadius: 12 }} />
+                <div className="skeleton" style={{ height: 200, borderRadius: 8 }} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {[1,2,3,4].map(i => <div key={i} className="skeleton" style={{ height: 40, borderRadius: 8 }} />)}
+                </div>
+              </div>
             ) : (
               <div style={{ textAlign: 'center', padding: 40, color: '#666' }}>
-                <div>Loading balance...</div>
+                <div>IB service unavailable</div>
                 <div style={{ fontSize: 12, marginTop: 8 }}>Make sure IB service is running (python ib_service.py)</div>
               </div>
             )}
@@ -729,7 +792,19 @@ export default function TradingDashboard() {
         }}>
           <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', marginBottom: 16 }}>Market News</h2>
           <div style={{ maxHeight: 400, overflowY: 'auto' }}>
-            {news.map((item, idx) => (
+            {isInitialLoading && news.length === 0 ? (
+              [1,2,3].map(i => (
+                <div key={i} style={{ padding: 12, marginBottom: 12, background: '#0d0d1e', borderRadius: 8, border: '1px solid #1a1a2e' }}>
+                  <div className="skeleton" style={{ height: 16, width: '75%', marginBottom: 8 }} />
+                  <div className="skeleton" style={{ height: 12, width: '90%', marginBottom: 4 }} />
+                  <div className="skeleton" style={{ height: 12, width: '60%', marginBottom: 12 }} />
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <div className="skeleton" style={{ height: 10, width: '15%' }} />
+                    <div className="skeleton" style={{ height: 10, width: '25%' }} />
+                  </div>
+                </div>
+              ))
+            ) : news.map((item, idx) => (
               <div key={idx} style={{
                 padding: 12,
                 marginBottom: 12,

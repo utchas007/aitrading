@@ -20,8 +20,9 @@ export interface Position {
   stopLoss: number;
   takeProfit: number;
   currentPrice: number;
-  entryTime?: number; // Timestamp when position was opened
-  highestPrice?: number; // Track highest price reached (for trailing)
+  entryTime?: number;    // Timestamp when position was opened
+  highestPrice?: number; // Highest price reached — used for BUY trailing stop
+  lowestPrice?: number;  // Lowest price reached  — used for SELL trailing stop
 }
 
 export interface PortfolioState {
@@ -205,31 +206,36 @@ export class RiskManager {
       }
       
     } else {
-      // SELL position logic (inverse)
+      // SELL (short) position logic — favorable direction is price going DOWN
+      // lowestPrice tracks the most favorable price reached since entry
+      const lowestPrice = position.lowestPrice || position.entryPrice;
+
       if (position.currentPrice >= position.stopLoss) {
         return { shouldClose: true, reason: 'stop-loss' };
       }
-      
+
       if (position.currentPrice <= position.takeProfit) {
         return { shouldClose: true, reason: 'take-profit' };
       }
-      
+
       const profitPercent = ((position.entryPrice - position.currentPrice) / position.entryPrice) * 100;
       const targetProfitPercent = ((position.entryPrice - position.takeProfit) / position.entryPrice) * 100;
-      
+
+      // Partial profit: reached 66% of target and price rebounded 5% from its low
       if (profitPercent >= targetProfitPercent * 0.66) {
-        const riseFromLow = ((position.currentPrice - highestPrice) / highestPrice) * 100;
+        const riseFromLow = ((position.currentPrice - lowestPrice) / lowestPrice) * 100;
         if (riseFromLow >= 5) {
           return { shouldClose: true, reason: 'partial-profit', partialClose: true };
         }
       }
-      
+
       if (hoursInPosition >= 24 && profitPercent > 5) {
         return { shouldClose: true, reason: 'time-exit', partialClose: profitPercent < targetProfitPercent };
       }
-      
+
+      // Trailing stop: if profit >= 15%, exit if price rises 10% above the lowest point
       if (profitPercent >= 15) {
-        const trailingStopPrice = highestPrice * 1.10;
+        const trailingStopPrice = lowestPrice * 1.10;
         if (position.currentPrice >= trailingStopPrice) {
           return { shouldClose: true, reason: 'trailing-stop' };
         }

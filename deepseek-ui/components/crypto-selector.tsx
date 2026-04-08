@@ -30,6 +30,7 @@ export default function CryptoSelector() {
   const [currentPairs, setCurrentPairs] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [prices, setPrices] = useState<{ [key: string]: { price: string; change: string } }>({});
 
   // Load current configuration
@@ -92,10 +93,11 @@ export default function CryptoSelector() {
 
   const applyChanges = async () => {
     if (selectedPairs.length === 0) {
-      alert("Please select at least one cryptocurrency");
+      setErrorMessage("Please select at least one cryptocurrency");
       return;
     }
 
+    setErrorMessage(null);
     setLoading(true);
     setSaveStatus("saving");
 
@@ -141,7 +143,7 @@ export default function CryptoSelector() {
     } catch (error: any) {
       console.error("Failed to apply changes:", error);
       setSaveStatus("error");
-      alert(`Error: ${error.message}`);
+      setErrorMessage(error.message || "Failed to apply changes");
       setTimeout(() => setSaveStatus("idle"), 3000);
     } finally {
       setLoading(false);
@@ -414,6 +416,21 @@ export default function CryptoSelector() {
           );
         })}
       </div>
+
+      {/* Inline error banner */}
+      {errorMessage && (
+        <div style={{
+          marginBottom: 16,
+          padding: "10px 16px",
+          background: "#ff4d6d15",
+          border: "1px solid #ff4d6d44",
+          borderRadius: 8,
+          color: "#ff4d6d",
+          fontSize: 13,
+        }}>
+          {errorMessage}
+        </div>
+      )}
 
       {/* Apply Button */}
       <div style={{

@@ -3,7 +3,7 @@
  * Fire-and-forget — never blocks the caller.
  */
 export function saveNotification(
-  type: 'trade_executed' | 'trade_failed' | 'ib_disconnected' | 'bot_stopped',
+  type: 'trade_executed' | 'trade_failed' | 'trade_closed' | 'ib_disconnected' | 'bot_stopped',
   title: string,
   message: string,
   pair?: string,
