@@ -6,6 +6,7 @@ import { useWebSocket } from "@/hooks/useWebSocket";
 export default function ActivityFeed() {
   const { activities, botStatus, ibHealth, connected } = useWebSocket();
   const [isStarting, setIsStarting] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
   const [isTogglingMode, setIsTogglingMode] = useState(false);
   const [checkInterval, setCheckInterval] = useState(2 * 60 * 1000);
   const [lastTrade, setLastTrade] = useState<string | null>(null);
@@ -81,27 +82,30 @@ export default function ActivityFeed() {
   };
 
   const stopBot = async () => {
-    await fetch("/api/trading/engine", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "stop" }),
-    }).catch(err => console.error("Failed to stop bot:", err));
+    setIsStopping(true);
+    try {
+      await fetch("/api/trading/engine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop" }),
+      });
+    } catch (err) {
+      console.error("Failed to stop bot:", err);
+    }
+    setIsStopping(false);
   };
 
-  // Toggle between live and safe mode — restarts bot if running
+  // Toggle between live and safe mode — restarts bot only if already running
   const toggleMode = async () => {
     setIsTogglingMode(true);
     const newMode = !isLive;
     try {
       if (isRunning) {
         await stopBot();
-        await new Promise(r => setTimeout(r, 800));
-        await startBot(newMode);
-      } else {
-        // Just update via a start+immediate-stop isn't ideal — instead
-        // store the intent locally; it takes effect on next start
+        await new Promise(r => setTimeout(r, 500));
         await startBot(newMode);
       }
+      // If bot is idle, mode change takes effect on next manual start
     } catch (error) {
       console.error("Failed to toggle mode:", error);
     }
@@ -160,18 +164,20 @@ export default function ActivityFeed() {
           ) : (
             <button
               onClick={stopBot}
+              disabled={isStopping}
               style={{
                 background: "linear-gradient(135deg, #ff4d6d22, #ff006622)",
                 border: "1px solid #ff4d6d55",
                 color: "#ff4d6d",
                 padding: "8px 14px",
                 borderRadius: 6,
-                cursor: "pointer",
+                cursor: isStopping ? "not-allowed" : "pointer",
                 fontSize: 12,
                 fontWeight: 600,
+                opacity: isStopping ? 0.5 : 1,
               }}
             >
-              ⏹ STOP
+              {isStopping ? "⏳ Stopping..." : "⏹ STOP"}
             </button>
           )}
         </div>

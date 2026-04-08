@@ -11,7 +11,7 @@ const BOT_URL = 'http://localhost:3002';
 // Try standalone bot first, fall back to in-process engine
 async function tryStandaloneBot(path: string, options?: RequestInit): Promise<Response | null> {
   try {
-    const res = await fetch(`${BOT_URL}${path}`, { ...options, signal: AbortSignal.timeout(2000) });
+    const res = await fetch(`${BOT_URL}${path}`, { ...options, signal: AbortSignal.timeout(300) });
     return res;
   } catch {
     return null;
