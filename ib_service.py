@@ -332,6 +332,7 @@ class BracketOrderRequest(BaseModel):
     quantity: float
     stop_loss_price: float             # Stop price for the STP child order
     take_profit_price: float           # Limit price for the LMT child order
+    limit_price: Optional[float] = None  # If set, entry is LMT order; otherwise MKT
     validate_only: bool = True         # SAFETY: True = dry-run by default
 
 
@@ -623,7 +624,11 @@ async def place_bracket_order(req: BracketOrderRequest):
             return {"what_if": what_if, "validate_only": True}
 
         # Build the 3-order bracket using IB-assigned order IDs
-        parent = MarketOrder(action, req.quantity)
+        # Use limit order for entry if limit_price provided (protects against gap risk)
+        if req.limit_price is not None:
+            parent = LimitOrder(action, req.quantity, round(req.limit_price, 2))
+        else:
+            parent = MarketOrder(action, req.quantity)
         parent.orderId = ib.client.getReqId()
         parent.transmit = False  # hold — don't send to exchange until all 3 are placed
 

@@ -735,14 +735,24 @@ export class TradingEngine {
       if (this.config.autoExecute) {
         // Live mode: place a bracket order so IB manages SL/TP natively.
         // This survives any process restart — exits are on IB's servers.
+        // Use a limit order entry (0.5% above current price for BUY, 0.5% below for SELL)
+        // This prevents overpaying if the stock gaps up/down overnight
+        const limitSlippage = 0.005;
+        const entryLimit = signal.action === 'buy'
+          ? parseFloat((signal.entryPrice * (1 + limitSlippage)).toFixed(2))
+          : parseFloat((signal.entryPrice * (1 - limitSlippage)).toFixed(2));
+
         const bracket = await ib.placeBracketOrder({
           symbol:           signal.pair,
           action:           signal.action === 'buy' ? 'BUY' : 'SELL',
           quantity:         signal.positionSize,
           stop_loss_price:  signal.stopLoss,
           take_profit_price: signal.takeProfit,
+          limit_price:      entryLimit,
           validate_only:    false,
         });
+
+        logActivity.info(`📋 Entry limit order @ $${entryLimit.toFixed(2)} (0.5% buffer vs signal $${signal.entryPrice.toFixed(2)})`);
 
         parentOrderId = bracket.parent_order_id;
         slOrderId     = bracket.stop_loss_order_id;

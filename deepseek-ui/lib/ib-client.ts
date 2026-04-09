@@ -93,6 +93,7 @@ export interface PlaceBracketOrderRequest {
   quantity: number;
   stop_loss_price: number;
   take_profit_price: number;
+  limit_price?: number; // If set, entry uses LMT order to avoid gap risk
   validate_only?: boolean;
 }
 
