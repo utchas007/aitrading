@@ -131,13 +131,13 @@ export default function Home() {
 
       {/* Main Content Area */}
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        {/* Main Content */}
-        <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
-          {view === 'chat'         && <LLMControlPanel />}
-          {view === 'trading'      && <TradingDashboard />}
-          {view === 'crypto'       && <CryptoSelector />}
-          {view === 'stocks'       && <StockSelector />}
-          {view === 'worldmonitor' && <WorldMonitorPanel />}
+        {/* Main Content — always mounted, hidden via CSS to preserve state & in-progress requests */}
+        <div style={{ flex: 1, minWidth: 0, overflow: 'auto', position: 'relative' }}>
+          <div style={{ display: view === 'chat'         ? 'block' : 'none' }}><LLMControlPanel /></div>
+          <div style={{ display: view === 'trading'      ? 'block' : 'none' }}><TradingDashboard /></div>
+          <div style={{ display: view === 'crypto'       ? 'block' : 'none' }}><CryptoSelector /></div>
+          <div style={{ display: view === 'stocks'       ? 'block' : 'none' }}><StockSelector /></div>
+          <div style={{ display: view === 'worldmonitor' ? 'block' : 'none' }}><WorldMonitorPanel /></div>
         </div>
 
         {/* Activity Feed Sidebar */}
