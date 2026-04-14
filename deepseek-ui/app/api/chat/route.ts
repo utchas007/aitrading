@@ -8,12 +8,250 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 120; // Allow up to 2 minutes for AI response
 
+// ─── Trade command detection & execution ─────────────────────────────────────
+
+const KNOWN_SYMBOLS = ['AAPL','MSFT','NVDA','TSLA','GOOGL','AMZN','META','AMD',
+                       'JPM','V','JNJ','XOM','CRM','PLTR','SNOW','GS','CVX','PFE',
+                       'SPY','QQQ','GLD'];
+
+// Bot defaults — keep in sync with trading-engine config
+const STOP_LOSS_PCT   = 0.05;  // 5% below entry
+const TAKE_PROFIT_PCT = 0.10;  // 10% above entry
+const RISK_PER_TRADE  = 0.05;  // 5% of available cash per trade
+
+interface TradeCommandResult {
+  executed: boolean;
+  symbol?: string;
+  quantity?: number;
+  action?: 'sell' | 'buy';
+  orderId?: number;
+  status?: string;
+  message: string;
+  error?: string;
+}
+
+interface ParsedCommand {
+  action: 'sell' | 'buy';
+  symbol: string;
+  /** number of shares, dollar amount (prefixed $), or 'all' (sell only) */
+  quantity: number | 'all';
+  isDollarAmount?: boolean;
+}
+
+/**
+ * Parse the user message for explicit trade commands.
+ *
+ * Sell patterns:
+ *   "sell AMZN", "sell all META", "sell my 50 AMZN shares",
+ *   "sell 100 shares of TSLA", "please sell my META position"
+ *
+ * Buy patterns:
+ *   "buy AMZN", "buy 10 TSLA", "buy 10 shares of NVDA",
+ *   "buy $500 worth of AAPL", "buy $1000 MSFT"
+ */
+function parseTradeCommand(text: string): ParsedCommand | null {
+  const normalized = text.toLowerCase().trim();
+
+  const isSell = /\bsell\b/.test(normalized);
+  const isBuy  = /\bbuy\b/.test(normalized);
+  if (!isSell && !isBuy) return null;
+  const action: 'sell' | 'buy' = isSell ? 'sell' : 'buy';
+
+  // ── Quantity + symbol patterns ───────────────────────────────────────────
+
+  // "$500 worth of SYMBOL" or "buy $500 SYMBOL"
+  const dollarRe = /\$(\d+(?:\.\d+)?)\s+(?:worth\s+of\s+)?([A-Z]{2,5})\b/i;
+  // "50 shares of SYMBOL" or "50 SYMBOL"
+  const qtySymbolRe = /\b(?:sell|buy)\b.*?\b(\d+(?:\.\d+)?)\s+(?:shares?\s+(?:of\s+)?)?([A-Z]{2,5})\b/i;
+  // "sell/buy [all|my|...] SYMBOL"
+  const plainSymbolRe = /\b(?:sell|buy)\b(?:\s+(?:all|my|all\s+my|my\s+entire|entire))?\s+(?:my\s+)?([A-Z]{2,5})\b/i;
+
+  let symbol: string | null = null;
+  let quantity: number | 'all' = action === 'sell' ? 'all' : 0;
+  let isDollarAmount = false;
+
+  const dollarMatch = text.match(dollarRe);
+  const qtyMatch    = text.match(qtySymbolRe);
+  const plainMatch  = text.match(plainSymbolRe);
+
+  if (dollarMatch) {
+    isDollarAmount = true;
+    quantity = parseFloat(dollarMatch[1]);
+    symbol   = dollarMatch[2].toUpperCase();
+  } else if (qtyMatch) {
+    quantity = parseFloat(qtyMatch[1]);
+    symbol   = qtyMatch[2].toUpperCase();
+  } else if (plainMatch) {
+    symbol   = plainMatch[1].toUpperCase();
+    quantity = action === 'sell' ? 'all' : 0; // 0 = auto-size for buys
+  }
+
+  if (!symbol || !KNOWN_SYMBOLS.includes(symbol)) return null;
+  return { action, symbol, quantity, isDollarAmount };
+}
+
+/** Fetch latest price from OHLC (ticker returns null for paper accounts without live data subscription) */
+async function getLatestPrice(symbol: string): Promise<number | null> {
+  try {
+    const res = await fetch(
+      `http://localhost:8765/ohlc/${symbol}?bar_size=5+mins&duration=1+D`,
+      { signal: AbortSignal.timeout(10000) }
+    );
+    if (!res.ok) return null;
+    const bars: Array<{ close: number }> = await res.json();
+    return bars.length > 0 ? bars[bars.length - 1].close : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Execute a trade command against the IB service.
+ * Sell → market order for the held position.
+ * Buy  → bracket order (GTC stop-loss + take-profit, matching bot config).
+ */
+async function executeTradeCommand(cmd: ParsedCommand): Promise<TradeCommandResult> {
+  try {
+    const ib = createIBClient();
+
+    // ── SELL ──────────────────────────────────────────────────────────────
+    if (cmd.action === 'sell') {
+      const positions = await ib.getPositions();
+      const pos = positions.find((p: any) => p.symbol === cmd.symbol && p.position > 0);
+
+      if (!pos) {
+        return {
+          executed: false, symbol: cmd.symbol, action: 'sell',
+          message: `No open position found for ${cmd.symbol} in your IB account.`,
+          error: 'no_position',
+        };
+      }
+
+      const qty = cmd.quantity === 'all'
+        ? pos.position
+        : Math.min(cmd.quantity as number, pos.position);
+
+      const res = await fetch('http://localhost:8765/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: cmd.symbol, action: 'SELL',
+          quantity: qty, order_type: 'MKT', validate_only: false,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        return {
+          executed: false, symbol: cmd.symbol, quantity: qty, action: 'sell',
+          message: `Failed to place sell order for ${cmd.symbol}: ${err.detail}`,
+          error: err.detail,
+        };
+      }
+
+      const order = await res.json();
+      return {
+        executed: true, symbol: cmd.symbol, quantity: qty, action: 'sell',
+        orderId: order.order_id, status: order.status,
+        message: `✅ SELL order placed: ${qty} shares of ${cmd.symbol} at market (Order #${order.order_id}, status: ${order.status}). Your avg cost was $${pos.avg_cost.toFixed(2)}/share.`,
+      };
+    }
+
+    // ── BUY ───────────────────────────────────────────────────────────────
+    // 1. Get current price
+    const price = await getLatestPrice(cmd.symbol);
+    if (!price || price <= 0) {
+      return {
+        executed: false, symbol: cmd.symbol, action: 'buy',
+        message: `Could not fetch a live price for ${cmd.symbol}. Try again in a moment.`,
+        error: 'no_price',
+      };
+    }
+
+    // 2. Determine share quantity
+    let qty: number;
+    if (cmd.isDollarAmount && typeof cmd.quantity === 'number') {
+      // User said "$500 worth"
+      qty = Math.floor((cmd.quantity as number) / price);
+    } else if (typeof cmd.quantity === 'number' && cmd.quantity > 0) {
+      // User specified shares directly
+      qty = Math.floor(cmd.quantity as number);
+    } else {
+      // Auto-size: 5% of available cash
+      const balance = await ib.getBalance().catch(() => ({})) as Record<string, string>;
+      const cashKey = Object.keys(balance).find((k: string) => k.startsWith('AvailableFunds_'));
+      const cash = cashKey ? parseFloat(balance[cashKey]) : 10000;
+      qty = Math.floor((cash * RISK_PER_TRADE) / price);
+    }
+
+    if (qty < 1) {
+      return {
+        executed: false, symbol: cmd.symbol, action: 'buy',
+        message: `Quantity rounded to 0 shares for ${cmd.symbol} at $${price.toFixed(2)} — not enough cash or amount too small.`,
+        error: 'qty_zero',
+      };
+    }
+
+    // 3. Calculate bracket levels (same as bot)
+    const stopLoss   = parseFloat((price * (1 - STOP_LOSS_PCT)).toFixed(2));
+    const takeProfit = parseFloat((price * (1 + TAKE_PROFIT_PCT)).toFixed(2));
+    const entryLimit = parseFloat((price * 1.005).toFixed(2)); // 0.5% slippage buffer
+
+    // 4. Place bracket order (GTC children via ib_service)
+    const res = await fetch('http://localhost:8765/bracket-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol: cmd.symbol, action: 'BUY',
+        quantity: qty,
+        limit_price: entryLimit,
+        stop_loss_price: stopLoss,
+        take_profit_price: takeProfit,
+        validate_only: false,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      return {
+        executed: false, symbol: cmd.symbol, quantity: qty, action: 'buy',
+        message: `Failed to place buy order for ${cmd.symbol}: ${err.detail}`,
+        error: err.detail,
+      };
+    }
+
+    const order = await res.json();
+    return {
+      executed: true, symbol: cmd.symbol, quantity: qty, action: 'buy',
+      orderId: order.parent_order_id, status: order.status,
+      message: `✅ BUY bracket order placed: ${qty} shares of ${cmd.symbol} @ limit $${entryLimit} | Stop-loss: $${stopLoss} | Take-profit: $${takeProfit} (Order #${order.parent_order_id}, status: ${order.status}). Both SL and TP are GTC and will survive restarts.`,
+    };
+  } catch (err: any) {
+    return {
+      executed: false, symbol: cmd.symbol, action: cmd.action,
+      message: `Trade execution error for ${cmd.symbol}: ${err.message}`,
+      error: err.message,
+    };
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { messages, model = 'deepseek-r1:14b', temperature = 0.7, max_tokens = 6000, system } = await req.json();
 
     if (!messages || messages.length === 0) {
       return NextResponse.json({ error: 'Messages are required' }, { status: 400 });
+    }
+
+    // ── Detect & execute trade commands from the latest user message ──────────
+    const lastUserMsg = [...messages].reverse().find((m: any) => m.role === 'user');
+    let tradeResult: TradeCommandResult | null = null;
+    if (lastUserMsg) {
+      const cmd = parseTradeCommand(lastUserMsg.content);
+      if (cmd) {
+        tradeResult = await executeTradeCommand(cmd);
+        console.log('[CHAT] Trade command executed:', tradeResult);
+      }
     }
 
     // Fetch real-time market data
@@ -82,8 +320,14 @@ You have FULL visibility into all this data below. Use it to provide informed, s
 DO NOT say you don't have access to markets, finance, or tech - you absolutely do!
 ===\n`;
 
+    // Inject trade execution result if a command was detected
+    let tradeContext = '';
+    if (tradeResult) {
+      tradeContext = `\n=== TRADE JUST EXECUTED BY YOU ===\n${tradeResult.message}\n(Confirm this action to the user in your response and provide any relevant market commentary.)\n===\n`;
+    }
+
     // Inject capabilities + time + market context at the top
-    prompt += `${capabilitiesContext}\n${timeContext}\nCURRENT MARKET DATA:\n${marketContext}\n\n`;
+    prompt += `${capabilitiesContext}\n${timeContext}\nCURRENT MARKET DATA:\n${marketContext}\n${tradeContext}\n`;
     
     messages.forEach((msg: { role: string; content: string }) => {
       if (msg.role === 'user') {

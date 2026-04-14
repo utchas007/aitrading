@@ -535,18 +535,23 @@ async def place_order(req: OrderRequest):
     # Build order params before entering the IB loop
     action     = req.action.upper()
     order_type = req.order_type.upper()
-    if order_type not in ("MKT", "LMT"):
+    if order_type not in ("MKT", "LMT", "STP"):
         raise HTTPException(status_code=400, detail=f"Unsupported order_type: {req.order_type}")
-    if order_type == "LMT" and req.limit_price is None:
-        raise HTTPException(status_code=400, detail="limit_price required for LMT orders")
+    if order_type in ("LMT", "STP") and req.limit_price is None:
+        raise HTTPException(status_code=400, detail="limit_price required for LMT/STP orders")
 
     async def _execute():
         contract = await _get_contract(req.symbol, req.sec_type, req.exchange, req.currency)
         if contract is None:
             return None
 
-        order = (MarketOrder(action, req.quantity) if order_type == "MKT"
-                 else LimitOrder(action, req.quantity, req.limit_price))
+        if order_type == "MKT":
+            order = MarketOrder(action, req.quantity)
+        elif order_type == "LMT":
+            order = LimitOrder(action, req.quantity, req.limit_price)
+        else:  # STP
+            order = StopOrder(action, req.quantity, req.limit_price)
+            order.tif = "GTC"
 
         if req.validate_only:
             order.whatIf = True
@@ -635,11 +640,13 @@ async def place_bracket_order(req: BracketOrderRequest):
         take_profit = LimitOrder(reverse_action, req.quantity, round(req.take_profit_price, 2))
         take_profit.orderId = ib.client.getReqId()
         take_profit.parentId = parent.orderId
+        take_profit.tif = "GTC"   # persist across sessions — don't expire at day end
         take_profit.transmit = False
 
         stop_loss = StopOrder(reverse_action, req.quantity, round(req.stop_loss_price, 2))
         stop_loss.orderId = ib.client.getReqId()
         stop_loss.parentId = parent.orderId
+        stop_loss.tif = "GTC"     # persist across sessions — don't expire at day end
         stop_loss.transmit = True  # transmitting this one sends all 3 together
 
         parent_trade = ib.placeOrder(contract, parent)

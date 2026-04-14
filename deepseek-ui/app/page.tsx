@@ -7,14 +7,16 @@ import ActivityFeed from "@/components/activity-feed";
 import CryptoSelector from "@/components/crypto-selector";
 import StockSelector from "@/components/stock-selector";
 import NotificationBell from "@/components/notification-bell";
+import { WorldMonitorPanel } from "@/components/worldmonitor-panel";
 
-type View = 'chat' | 'trading' | 'crypto' | 'stocks';
+type View = 'chat' | 'trading' | 'crypto' | 'stocks' | 'worldmonitor';
 
 const NAV_ITEMS: { id: View; label: string }[] = [
-  { id: 'chat',    label: '💬 AI Chat' },
-  { id: 'trading', label: '📈 Trading' },
-  { id: 'crypto',  label: '🪙 Crypto' },
-  { id: 'stocks',  label: '🏦 Stocks' },
+  { id: 'chat',         label: '💬 AI Chat' },
+  { id: 'trading',      label: '📈 Trading' },
+  { id: 'crypto',       label: '🪙 Crypto' },
+  { id: 'stocks',       label: '🏦 Stocks' },
+  { id: 'worldmonitor', label: '🌍 World Monitor' },
 ];
 
 export default function Home() {
@@ -131,10 +133,11 @@ export default function Home() {
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {/* Main Content */}
         <div style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
-          {view === 'chat'    && <LLMControlPanel />}
-          {view === 'trading' && <TradingDashboard />}
-          {view === 'crypto'  && <CryptoSelector />}
-          {view === 'stocks'  && <StockSelector />}
+          {view === 'chat'         && <LLMControlPanel />}
+          {view === 'trading'      && <TradingDashboard />}
+          {view === 'crypto'       && <CryptoSelector />}
+          {view === 'stocks'       && <StockSelector />}
+          {view === 'worldmonitor' && <WorldMonitorPanel />}
         </div>
 
         {/* Activity Feed Sidebar */}

@@ -42,22 +42,24 @@ model TradingSignal {
 }
 
 model Trade {
-  id          Int       @id @default(autoincrement())
-  createdAt   DateTime  @default(now())
-  closedAt    DateTime?
-  pair        String
-  type        String
-  entryPrice  Float
-  exitPrice   Float?
-  volume      Float
-  stopLoss    Float
-  takeProfit  Float
-  pnl         Float?
-  pnlPercent  Float?
-  status      String    @default("open")
-  txid        String?
-  closeTxid   String?
-  closeReason String?
+  id            Int       @id @default(autoincrement())
+  createdAt     DateTime  @default(now())
+  closedAt      DateTime?
+  pair          String
+  type          String
+  entryPrice    Float
+  exitPrice     Float?
+  volume        Float
+  stopLoss      Float
+  takeProfit    Float
+  pnl           Float?
+  pnlPercent    Float?
+  status        String    @default("open")
+  txid          String?   // parentOrderId (entry order)
+  closeTxid     String?
+  closeReason   String?
+  slOrderId     Int?      // IB stop-loss child order ID — survives app restarts
+  tpOrderId     Int?      // IB take-profit child order ID — survives app restarts
 
   @@index([pair, createdAt])
   @@index([status])

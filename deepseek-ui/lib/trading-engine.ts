@@ -714,10 +714,22 @@ export class TradingEngine {
 
       if (signal.action === 'hold') return;
 
+      // Fetch IB positions once — used for both BUY and SELL guards below
+      const ibPositions = await ib.getPositions();
+
+      // For BUY: skip if IB already holds shares of this symbol (avoids doubling up on
+      // positions the bot lost track of after a restart)
+      if (signal.action === 'buy') {
+        const existing = ibPositions.find(p => p.symbol === signal.pair && p.position > 0);
+        if (existing) {
+          logActivity.warning(`⚠️ Skipping BUY for ${signal.pair}: already holding ${existing.position} shares in IB (untracked position). Will wait for bot to re-enter after next exit.`);
+          return;
+        }
+      }
+
       // For SELL: verify we actually hold shares via IB positions
       if (signal.action === 'sell') {
-        const positions = await ib.getPositions();
-        const pos = positions.find(p => p.symbol === signal.pair && p.position > 0);
+        const pos = ibPositions.find(p => p.symbol === signal.pair && p.position > 0);
         if (!pos) {
           logActivity.warning(`Cannot sell ${signal.pair}: No IB position found`);
           return;
@@ -799,6 +811,8 @@ export class TradingEngine {
               takeProfit: signal.takeProfit,
               status:     'open',
               txid:       posId,
+              slOrderId:  slOrderId  ?? null,
+              tpOrderId:  tpOrderId  ?? null,
             },
           });
           dbTradeId = dbTrade.id;
@@ -985,11 +999,14 @@ export class TradingEngine {
             pnlPercent:    0,
             timestamp:     trade.createdAt.getTime(),
             dbTradeId:     trade.id,
-            // txid is the parentOrderId string from when the bracket order was placed
             parentOrderId: trade.txid ? (parseInt(trade.txid) || undefined) : undefined,
+            slOrderId:     (trade as any).slOrderId ?? undefined,
+            tpOrderId:     (trade as any).tpOrderId ?? undefined,
           });
           recovered++;
-          logActivity.info(`✅ Recovered: ${trade.pair} | ${ibPos.position} shares @ $${trade.entryPrice.toFixed(2)} | SL: $${trade.stopLoss.toFixed(2)} TP: $${trade.takeProfit.toFixed(2)} | IB bracket still active`);
+          const slInfo = (trade as any).slOrderId ? ` | SL order #${(trade as any).slOrderId}` : '';
+          const tpInfo = (trade as any).tpOrderId ? ` | TP order #${(trade as any).tpOrderId}` : '';
+          logActivity.info(`✅ Recovered: ${trade.pair} | ${ibPos.position} shares @ $${trade.entryPrice.toFixed(2)} | SL: $${trade.stopLoss.toFixed(2)}${slInfo} | TP: $${trade.takeProfit.toFixed(2)}${tpInfo}`);
         } else {
           // IB no longer holds shares — closed while bot was offline
           logActivity.warning(`⚠️ ${trade.pair} trade #${trade.id} not in IB positions — marking closed (offline close)`);

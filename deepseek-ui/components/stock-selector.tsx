@@ -18,24 +18,56 @@ const AVAILABLE_STOCKS: Stock[] = [
   { symbol: "GOOGL", name: "Alphabet Inc.",          sector: "Technology",   tier: "large", description: "Search, YouTube, Google Cloud, AI (Gemini)" },
   { symbol: "AMZN",  name: "Amazon.com Inc.",        sector: "Technology",   tier: "large", description: "E-commerce, AWS cloud, advertising" },
   { symbol: "META",  name: "Meta Platforms",         sector: "Technology",   tier: "large", description: "Facebook, Instagram, WhatsApp, AI/VR push" },
+  { symbol: "NFLX",  name: "Netflix Inc.",           sector: "Technology",   tier: "large", description: "Streaming leader, ad-supported tier, global growth" },
+  { symbol: "ORCL",  name: "Oracle Corp.",           sector: "Technology",   tier: "large", description: "Cloud infrastructure, database, AI workloads" },
+  { symbol: "ADBE",  name: "Adobe Inc.",             sector: "Technology",   tier: "large", description: "Creative Cloud, Acrobat, Firefly AI, digital media" },
+  { symbol: "AVGO",  name: "Broadcom Inc.",          sector: "Technology",   tier: "large", description: "Semiconductors, networking chips, VMware software" },
   // Large Cap — Other
   { symbol: "TSLA",  name: "Tesla Inc.",             sector: "Automotive",   tier: "large", description: "Electric vehicles, energy storage, FSD autonomy" },
   { symbol: "JPM",   name: "JPMorgan Chase",         sector: "Finance",      tier: "large", description: "Largest US bank, investment banking, asset mgmt" },
   { symbol: "V",     name: "Visa Inc.",              sector: "Finance",      tier: "large", description: "Global payments network, high margins, stable" },
+  { symbol: "BAC",   name: "Bank of America",        sector: "Finance",      tier: "large", description: "US retail banking, Merrill Lynch, consumer deposits" },
+  { symbol: "BRK.B", name: "Berkshire Hathaway B",  sector: "Finance",      tier: "large", description: "Buffett's conglomerate — BNSF, GEICO, diversified holdings" },
   { symbol: "JNJ",   name: "Johnson & Johnson",      sector: "Healthcare",   tier: "large", description: "Pharma, medtech, defensive dividend stock" },
+  { symbol: "UNH",   name: "UnitedHealth Group",     sector: "Healthcare",   tier: "large", description: "Largest US health insurer, Optum data & care platform" },
+  { symbol: "LLY",   name: "Eli Lilly",              sector: "Healthcare",   tier: "large", description: "Ozempic/Mounjaro weight-loss drugs, diabetes, oncology" },
   { symbol: "XOM",   name: "ExxonMobil",             sector: "Energy",       tier: "large", description: "Oil & gas giant, dividend, inflation hedge" },
+  { symbol: "WMT",   name: "Walmart Inc.",           sector: "Consumer",     tier: "large", description: "Largest retailer, grocery dominance, e-commerce growth" },
+  { symbol: "COST",  name: "Costco Wholesale",       sector: "Consumer",     tier: "large", description: "Membership warehouse, high loyalty, resilient model" },
+  { symbol: "MCD",   name: "McDonald's Corp.",       sector: "Consumer",     tier: "large", description: "Global fast food, franchise model, real estate assets" },
   // Mid Cap — Tech
   { symbol: "AMD",   name: "Advanced Micro Devices", sector: "Technology",   tier: "mid",   description: "CPUs/GPUs, AI accelerators, Ryzen & EPYC chips" },
   { symbol: "CRM",   name: "Salesforce Inc.",        sector: "Technology",   tier: "mid",   description: "CRM SaaS leader, enterprise software" },
   { symbol: "PLTR",  name: "Palantir Technologies",  sector: "Technology",   tier: "mid",   description: "AI/data analytics platform, government & enterprise" },
   { symbol: "SNOW",  name: "Snowflake Inc.",         sector: "Technology",   tier: "mid",   description: "Cloud data platform, high growth SaaS" },
+  { symbol: "INTC",  name: "Intel Corp.",            sector: "Technology",   tier: "mid",   description: "Legacy CPU maker, foundry turnaround play, AI chips" },
+  { symbol: "QCOM",  name: "Qualcomm Inc.",          sector: "Technology",   tier: "mid",   description: "Mobile chipsets, 5G modems, automotive compute" },
+  { symbol: "SHOP",  name: "Shopify Inc.",           sector: "Technology",   tier: "mid",   description: "E-commerce platform, merchant tools, payment gateway" },
+  { symbol: "UBER",  name: "Uber Technologies",      sector: "Technology",   tier: "mid",   description: "Ride-hailing, food delivery, freight — profitable now" },
   // Mid Cap — Other
   { symbol: "GS",    name: "Goldman Sachs",          sector: "Finance",      tier: "mid",   description: "Investment banking, trading, asset management" },
+  { symbol: "MS",    name: "Morgan Stanley",         sector: "Finance",      tier: "mid",   description: "Wealth mgmt, investment banking, E*TRADE retail" },
+  { symbol: "AXP",   name: "American Express",       sector: "Finance",      tier: "mid",   description: "Premium card network, affluent customer base, travel" },
   { symbol: "CVX",   name: "Chevron Corp.",          sector: "Energy",       tier: "mid",   description: "Oil & gas, renewable energy transition" },
   { symbol: "PFE",   name: "Pfizer Inc.",            sector: "Healthcare",   tier: "mid",   description: "Pharma giant, mRNA vaccines, oncology pipeline" },
+  { symbol: "ABBV",  name: "AbbVie Inc.",            sector: "Healthcare",   tier: "mid",   description: "Humira successor Skyrizi/Rinvoq, immunology & oncology" },
+  { symbol: "MRK",   name: "Merck & Co.",            sector: "Healthcare",   tier: "mid",   description: "Keytruda cancer drug, vaccines, animal health division" },
+  { symbol: "BA",    name: "Boeing Co.",             sector: "Industrial",   tier: "mid",   description: "Commercial jets, defense, aerospace — recovery story" },
+  { symbol: "CAT",   name: "Caterpillar Inc.",       sector: "Industrial",   tier: "mid",   description: "Heavy machinery, mining & construction, global infra play" },
+  { symbol: "HON",   name: "Honeywell Intl.",        sector: "Industrial",   tier: "mid",   description: "Aerospace systems, building tech, automation software" },
+  { symbol: "NKE",   name: "Nike Inc.",              sector: "Consumer",     tier: "mid",   description: "Sneakers & apparel, DTC digital push, global brand" },
+  { symbol: "SBUX",  name: "Starbucks Corp.",        sector: "Consumer",     tier: "mid",   description: "Coffee chain, loyalty rewards, China growth story" },
+  { symbol: "T",     name: "AT&T Inc.",              sector: "Telecom",      tier: "mid",   description: "US wireless carrier, high dividend, post-DirecTV reorg" },
+  { symbol: "VZ",    name: "Verizon Comms.",         sector: "Telecom",      tier: "mid",   description: "US wireless & broadband, steady dividend payer" },
+  { symbol: "COIN",  name: "Coinbase Global",        sector: "Crypto",       tier: "mid",   description: "Largest US crypto exchange, fee revenue, regulatory focus" },
+  { symbol: "MSTR",  name: "MicroStrategy",          sector: "Crypto",       tier: "mid",   description: "Bitcoin treasury company, high BTC leverage, volatile" },
   // ETFs
   { symbol: "SPY",   name: "S&P 500 ETF",            sector: "ETF",          tier: "large", description: "Tracks S&P 500, broad market exposure" },
   { symbol: "QQQ",   name: "Nasdaq-100 ETF",         sector: "ETF",          tier: "large", description: "Top 100 Nasdaq stocks, heavy tech weighting" },
+  { symbol: "IWM",   name: "Russell 2000 ETF",       sector: "ETF",          tier: "large", description: "Small-cap US stocks, higher beta, domestic economy play" },
+  { symbol: "DIA",   name: "Dow Jones ETF",          sector: "ETF",          tier: "large", description: "Tracks the 30 Dow Jones industrials, blue-chip focus" },
+  { symbol: "GLD",   name: "Gold ETF",               sector: "ETF",          tier: "large", description: "Physical gold exposure, safe haven, inflation hedge" },
+  { symbol: "SOXL",  name: "Semi Bull 3x ETF",       sector: "ETF",          tier: "large", description: "3x leveraged semiconductors — high risk, high reward" },
 ];
 
 const SECTOR_COLORS: Record<string, { bg: string; border: string; text: string }> = {
@@ -44,6 +76,10 @@ const SECTOR_COLORS: Record<string, { bg: string; border: string; text: string }
   Finance:     { bg: "#00ff9f15", border: "#00ff9f44", text: "#00ff9f" },
   Healthcare:  { bg: "#a855f715", border: "#a855f744", text: "#c084fc" },
   Energy:      { bg: "#ffd60a15", border: "#ffd60a44", text: "#fbbf24" },
+  Consumer:    { bg: "#f9731615", border: "#f9731644", text: "#fb923c" },
+  Industrial:  { bg: "#64748b15", border: "#64748b44", text: "#94a3b8" },
+  Telecom:     { bg: "#06b6d415", border: "#06b6d444", text: "#22d3ee" },
+  Crypto:      { bg: "#f59e0b15", border: "#f59e0b44", text: "#fbbf24" },
   ETF:         { bg: "#14b8a615", border: "#14b8a644", text: "#2dd4bf" },
 };
 
@@ -129,9 +165,9 @@ export default function StockSelector() {
       const data = await res.json();
       if (data.success && data.data) {
         const priceData: typeof prices = {};
-        for (const [symbol, info] of Object.entries(data.data as Record<string, any>)) {
+        for (const [symbol, info] of Object.entries(data.data as Record<string, { price?: string | number | null }>)) {
           const p = info?.price ?? null;
-          priceData[symbol] = { price: p != null ? parseFloat(p).toFixed(2) : null };
+          priceData[symbol] = { price: p != null ? parseFloat(String(p)).toFixed(2) : null };
         }
         setPrices(priceData);
         localStorage.setItem("stock_prices_cache", JSON.stringify({ data: priceData, ts: Date.now() }));
@@ -196,10 +232,10 @@ export default function StockSelector() {
       } else {
         throw new Error(data.error || "Failed to apply changes");
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Failed to apply changes:", error);
       setSaveStatus("error");
-      setValidationError(`Error: ${error.message}`);
+      setValidationError(`Error: ${error instanceof Error ? error.message : String(error)}`);
       setTimeout(() => setSaveStatus("idle"), 3000);
     } finally {
       setLoading(false);
@@ -261,6 +297,10 @@ export default function StockSelector() {
         <div style={{ width: 1, height: 32, background: "#2a2a4a" }} />
         <button onClick={() => selectBySector("Technology")} style={filterBtn()}>Tech</button>
         <button onClick={() => selectBySector("Finance")}    style={filterBtn()}>Finance</button>
+        <button onClick={() => selectBySector("Healthcare")} style={filterBtn()}>Health</button>
+        <button onClick={() => selectBySector("Consumer")}   style={filterBtn()}>Consumer</button>
+        <button onClick={() => selectBySector("Industrial")} style={filterBtn()}>Industrial</button>
+        <button onClick={() => selectBySector("Crypto")}     style={filterBtn()}>Crypto</button>
         <button onClick={() => selectBySector("ETF")}        style={filterBtn()}>ETFs</button>
       </div>
 
