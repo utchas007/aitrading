@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createKrakenClient } from '@/lib/kraken';
 import { createIBClient } from '@/lib/ib-client';
-import { getHistoricalPrices, analyzeTechnicalIndicators } from '@/lib/technical-indicators';
 import { getMarketContextForAI } from '@/lib/worldmonitor-data';
 
 export const runtime = 'nodejs';
@@ -221,10 +220,41 @@ async function executeTradeCommand(cmd: ParsedCommand): Promise<TradeCommandResu
     }
 
     const order = await res.json();
+
+    const expectedProfitUSD = parseFloat((qty * (takeProfit - price)).toFixed(2));
+    const expectedLossUSD   = parseFloat((qty * (price - stopLoss)).toFixed(2));
+    const riskReward        = expectedLossUSD > 0
+      ? (expectedProfitUSD / expectedLossUSD).toFixed(2)
+      : 'N/A';
+
+    // Persist to DB so the profit target survives restarts
+    try {
+      const { prisma } = await import('@/lib/db');
+      await prisma.trade.create({
+        data: {
+          pair:              cmd.symbol,
+          type:              'buy',
+          entryPrice:        price,
+          volume:            qty,
+          stopLoss,
+          takeProfit,
+          status:            'open',
+          txid:              order.parent_order_id?.toString() ?? null,
+          slOrderId:         order.stop_loss_order_id   ?? null,
+          tpOrderId:         order.take_profit_order_id ?? null,
+          expectedProfitUSD,
+          expectedLossUSD,
+          riskRewardRatio:   parseFloat(riskReward) || null,
+        },
+      });
+    } catch (dbErr: any) {
+      console.error('[CHAT] Failed to save trade to DB:', dbErr.message);
+    }
+
     return {
       executed: true, symbol: cmd.symbol, quantity: qty, action: 'buy',
       orderId: order.parent_order_id, status: order.status,
-      message: `✅ BUY bracket order placed: ${qty} shares of ${cmd.symbol} @ limit $${entryLimit} | Stop-loss: $${stopLoss} | Take-profit: $${takeProfit} (Order #${order.parent_order_id}, status: ${order.status}). Both SL and TP are GTC and will survive restarts.`,
+      message: `✅ BUY bracket order placed: ${qty} shares of ${cmd.symbol} @ limit $${entryLimit} | Stop-loss: $${stopLoss} (-$${expectedLossUSD}) | Take-profit: $${takeProfit} (+$${expectedProfitUSD}) | R:R ${riskReward} | Both SL and TP are GTC and will survive restarts.`,
     };
   } catch (err: any) {
     return {

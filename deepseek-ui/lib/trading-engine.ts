@@ -801,18 +801,37 @@ export class TradingEngine {
       if (this.config.autoExecute) {
         try {
           const { prisma } = await import('./db');
+          const expectedProfitUSD = parseFloat(
+            (signal.positionSize * (signal.takeProfit - signal.entryPrice)).toFixed(2)
+          );
+          const expectedLossUSD = parseFloat(
+            (signal.positionSize * (signal.entryPrice - signal.stopLoss)).toFixed(2)
+          );
+          const riskRewardRatio = expectedLossUSD > 0
+            ? parseFloat((expectedProfitUSD / expectedLossUSD).toFixed(2))
+            : null;
+
+          logActivity.info(
+            `🎯 Expected profit if TP hits: $${expectedProfitUSD.toFixed(2)} | ` +
+            `Expected loss if SL hits: -$${expectedLossUSD.toFixed(2)} | ` +
+            `R:R ratio: ${riskRewardRatio ?? 'N/A'}`
+          );
+
           const dbTrade = await prisma.trade.create({
             data: {
-              pair:       signal.pair,
-              type:       signal.action,
-              entryPrice: signal.entryPrice,
-              volume:     signal.positionSize,
-              stopLoss:   signal.stopLoss,
-              takeProfit: signal.takeProfit,
-              status:     'open',
-              txid:       posId,
-              slOrderId:  slOrderId  ?? null,
-              tpOrderId:  tpOrderId  ?? null,
+              pair:              signal.pair,
+              type:              signal.action,
+              entryPrice:        signal.entryPrice,
+              volume:            signal.positionSize,
+              stopLoss:          signal.stopLoss,
+              takeProfit:        signal.takeProfit,
+              status:            'open',
+              txid:              posId,
+              slOrderId:         slOrderId  ?? null,
+              tpOrderId:         tpOrderId  ?? null,
+              expectedProfitUSD,
+              expectedLossUSD,
+              riskRewardRatio,
             },
           });
           dbTradeId = dbTrade.id;

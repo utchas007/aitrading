@@ -58,8 +58,11 @@ model Trade {
   txid          String?   // parentOrderId (entry order)
   closeTxid     String?
   closeReason   String?
-  slOrderId     Int?      // IB stop-loss child order ID — survives app restarts
-  tpOrderId     Int?      // IB take-profit child order ID — survives app restarts
+  slOrderId          Int?      // IB stop-loss child order ID — survives app restarts
+  tpOrderId          Int?      // IB take-profit child order ID — survives app restarts
+  expectedProfitUSD  Float?    // Dollar profit if TP hits: volume × (takeProfit − entryPrice)
+  expectedLossUSD    Float?    // Dollar loss if SL hits:   volume × (entryPrice − stopLoss)
+  riskRewardRatio    Float?    // expectedProfitUSD / expectedLossUSD
 
   @@index([pair, createdAt])
   @@index([status])
