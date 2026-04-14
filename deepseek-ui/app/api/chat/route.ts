@@ -281,13 +281,6 @@ export async function POST(req: NextRequest) {
       if (cmd) {
         tradeResult = await executeTradeCommand(cmd);
         console.log('[CHAT] Trade command executed:', tradeResult);
-
-        // Return immediately — don't make the user wait for market data + Ollama.
-        // Trade commands need instant feedback, not a 60-second AI response.
-        const instant = tradeResult.executed
-          ? `${tradeResult.message}`
-          : `⚠️ ${tradeResult.message}`;
-        return NextResponse.json({ response: instant, model, done: true, tokens: 0 });
       }
     }
 
@@ -357,8 +350,14 @@ You have FULL visibility into all this data below. Use it to provide informed, s
 DO NOT say you don't have access to markets, finance, or tech - you absolutely do!
 ===\n`;
 
+    // Inject trade execution result if a command was detected
+    let tradeContext = '';
+    if (tradeResult) {
+      tradeContext = `\n=== TRADE JUST EXECUTED BY YOU ===\n${tradeResult.message}\n(Confirm this action to the user in your response and provide any relevant market commentary.)\n===\n`;
+    }
+
     // Inject capabilities + time + market context at the top
-    prompt += `${capabilitiesContext}\n${timeContext}\nCURRENT MARKET DATA:\n${marketContext}\n`;
+    prompt += `${capabilitiesContext}\n${timeContext}\nCURRENT MARKET DATA:\n${marketContext}\n${tradeContext}\n`;
     
     messages.forEach((msg: { role: string; content: string }) => {
       if (msg.role === 'user') {
