@@ -40,13 +40,11 @@ interface ParsedCommand {
 /**
  * Parse the user message for explicit trade commands.
  *
- * Sell patterns:
- *   "sell AMZN", "sell all META", "sell my 50 AMZN shares",
- *   "sell 100 shares of TSLA", "please sell my META position"
- *
- * Buy patterns:
- *   "buy AMZN", "buy 10 TSLA", "buy 10 shares of NVDA",
- *   "buy $500 worth of AAPL", "buy $1000 MSFT"
+ * Strategy: look for sell/buy keyword + any known symbol anywhere in the
+ * message. This handles any natural phrasing without brittle word-order rules:
+ *   "sell the META shares", "can you sell my AMZN for me",
+ *   "please go ahead and sell META", "buy 10 NVDA shares",
+ *   "buy $500 worth of AAPL", "I'd like to sell my TSLA position"
  */
 function parseTradeCommand(text: string): ParsedCommand | null {
   const normalized = text.toLowerCase().trim();
@@ -56,36 +54,37 @@ function parseTradeCommand(text: string): ParsedCommand | null {
   if (!isSell && !isBuy) return null;
   const action: 'sell' | 'buy' = isSell ? 'sell' : 'buy';
 
-  // ── Quantity + symbol patterns ───────────────────────────────────────────
+  // Find any known symbol mentioned anywhere in the message
+  const symbol = KNOWN_SYMBOLS.find(s => new RegExp(`\\b${s}\\b`, 'i').test(text));
+  if (!symbol) return null;
 
-  // "$500 worth of SYMBOL" or "buy $500 SYMBOL"
-  const dollarRe = /\$(\d+(?:\.\d+)?)\s+(?:worth\s+of\s+)?([A-Z]{2,5})\b/i;
-  // "50 shares of SYMBOL" or "50 SYMBOL"
-  const qtySymbolRe = /\b(?:sell|buy)\b.*?\b(\d+(?:\.\d+)?)\s+(?:shares?\s+(?:of\s+)?)?([A-Z]{2,5})\b/i;
-  // "sell/buy [all|my|...] SYMBOL"
-  const plainSymbolRe = /\b(?:sell|buy)\b(?:\s+(?:all|my|all\s+my|my\s+entire|entire))?\s+(?:my\s+)?([A-Z]{2,5})\b/i;
-
-  let symbol: string | null = null;
   let quantity: number | 'all' = action === 'sell' ? 'all' : 0;
   let isDollarAmount = false;
 
-  const dollarMatch = text.match(dollarRe);
-  const qtyMatch    = text.match(qtySymbolRe);
-  const plainMatch  = text.match(plainSymbolRe);
-
+  // Dollar amount: "$500 worth", "$1000"
+  const dollarMatch = text.match(/\$(\d+(?:\.\d+)?)/);
   if (dollarMatch) {
     isDollarAmount = true;
     quantity = parseFloat(dollarMatch[1]);
-    symbol   = dollarMatch[2].toUpperCase();
-  } else if (qtyMatch) {
-    quantity = parseFloat(qtyMatch[1]);
-    symbol   = qtyMatch[2].toUpperCase();
-  } else if (plainMatch) {
-    symbol   = plainMatch[1].toUpperCase();
-    quantity = action === 'sell' ? 'all' : 0; // 0 = auto-size for buys
+    return { action, symbol, quantity, isDollarAmount };
   }
 
-  if (!symbol || !KNOWN_SYMBOLS.includes(symbol)) return null;
+  // Explicit share count: "10 shares", "sell 50 META", "buy 10 NVDA"
+  const qtyMatch = text.match(/\b(\d+(?:\.\d+)?)\s*(?:shares?)?\b/i);
+  if (qtyMatch) {
+    const n = parseFloat(qtyMatch[1]);
+    // Ignore small standalone numbers that are likely prices/percentages not quantities
+    // Only treat as quantity if it's a reasonable share count (>= 1)
+    if (n >= 1 && n < 100000) {
+      quantity = n;
+    }
+  }
+
+  // "all", "everything", "entire", "whole" → sell all
+  if (/\b(all|everything|entire|whole|position)\b/i.test(text)) {
+    quantity = 'all';
+  }
+
   return { action, symbol, quantity, isDollarAmount };
 }
 

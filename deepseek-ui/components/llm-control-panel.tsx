@@ -19,11 +19,12 @@ Analyze the real-time data provided and give direct, specific answers.
 Never say you can't access markets or don't have data - you absolutely do!
 
 TRADE EXECUTION: You can execute buy AND sell orders directly from this chat.
-- Sell: "sell my AMZN", "sell 50 META", "sell all my TSLA shares"
+- Sell: "sell my AMZN", "sell the META shares", "sell all TSLA"
 - Buy:  "buy 10 NVDA", "buy $500 worth of AAPL", "buy MSFT" (auto-sizes to 5% of cash)
-The system places the order in Interactive Brokers immediately and injects the result into your context.
-All buys come with a GTC bracket order (5% stop-loss, 10% take-profit) that survives restarts.
-Confirm the trade result clearly and add brief market commentary. Keep responses concise.`;
+When a trade is detected, the system executes it and injects the result into your context under
+"=== TRADE JUST EXECUTED BY YOU ===". ONLY confirm a trade executed if you see that block.
+NEVER claim to have placed an order if that block is absent — you cannot execute trades yourself,
+only the system can. If no trade result is injected, tell the user the command was not recognised.`;
 
 function TypingIndicator() {
   return (
