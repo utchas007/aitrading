@@ -79,6 +79,10 @@ export interface ActivePosition {
   parentOrderId?: number;     // Entry market order
   slOrderId?: number;         // Stop-loss child order
   tpOrderId?: number;         // Take-profit child order
+  // Profit/loss targets in dollar terms — always known, survives restarts
+  expectedProfitUSD?: number; // Dollar gain if take-profit fires
+  expectedLossUSD?: number;   // Dollar loss if stop-loss fires
+  riskRewardRatio?: number;   // expectedProfitUSD / expectedLossUSD
 }
 
 export interface TradingEngineConfig {
@@ -840,22 +844,34 @@ export class TradingEngine {
         }
       }
 
+      const expectedProfitUSD_ = parseFloat(
+        (signal.positionSize * (signal.takeProfit - signal.entryPrice)).toFixed(2)
+      );
+      const expectedLossUSD_ = parseFloat(
+        (signal.positionSize * (signal.entryPrice - signal.stopLoss)).toFixed(2)
+      );
+
       this.activePositions.set(posId, {
-        txid:          posId,
-        pair:          signal.pair,
-        type:          signal.action,
-        entryPrice:    signal.entryPrice,
-        volume:        signal.positionSize,
-        stopLoss:      signal.stopLoss,
-        takeProfit:    signal.takeProfit,
-        currentPrice:  signal.entryPrice,
-        pnl:           0,
-        pnlPercent:    0,
-        timestamp:     signal.timestamp,
+        txid:              posId,
+        pair:              signal.pair,
+        type:              signal.action,
+        entryPrice:        signal.entryPrice,
+        volume:            signal.positionSize,
+        stopLoss:          signal.stopLoss,
+        takeProfit:        signal.takeProfit,
+        currentPrice:      signal.entryPrice,
+        pnl:               0,
+        pnlPercent:        0,
+        timestamp:         signal.timestamp,
         dbTradeId,
         parentOrderId,
         slOrderId,
         tpOrderId,
+        expectedProfitUSD: expectedProfitUSD_,
+        expectedLossUSD:   expectedLossUSD_,
+        riskRewardRatio:   expectedLossUSD_ > 0
+          ? parseFloat((expectedProfitUSD_ / expectedLossUSD_).toFixed(2))
+          : undefined,
       });
     } catch (error: any) {
       console.error(`❌ Failed to execute order:`, error.message);
@@ -908,6 +924,22 @@ export class TradingEngine {
           } else {
             position.pnl        = (position.entryPrice - currentPrice) * position.volume;
             position.pnlPercent = ((position.entryPrice - currentPrice) / position.entryPrice) * 100;
+          }
+
+          // Log progress toward profit target if we know it
+          if (position.expectedProfitUSD && position.expectedProfitUSD > 0) {
+            const progressPct = Math.min(
+              ((position.pnl / position.expectedProfitUSD) * 100),
+              100
+            ).toFixed(1);
+            const progressBar = '█'.repeat(Math.floor(parseFloat(progressPct) / 10))
+                              + '░'.repeat(10 - Math.floor(parseFloat(progressPct) / 10));
+            logActivity.info(
+              `📈 ${position.pair} — P&L: $${position.pnl.toFixed(2)} / target $${position.expectedProfitUSD.toFixed(2)} ` +
+              `[${progressBar}] ${progressPct}% | ` +
+              `SL: $${position.stopLoss.toFixed(2)} (-$${position.expectedLossUSD?.toFixed(2) ?? '?'}) | ` +
+              `TP: $${position.takeProfit.toFixed(2)}`
+            );
           }
         } catch {
           // Price fetch failed; keep previous values and continue
@@ -1005,27 +1037,33 @@ export class TradingEngine {
         if (ibPos) {
           // IB confirms shares are still held — restore to activePositions
           const posId = trade.txid ?? `${trade.pair}-${trade.id}`;
+          const t = trade as any;
           this.activePositions.set(posId, {
-            txid:          posId,
-            pair:          trade.pair,
-            type:          trade.type as 'buy' | 'sell',
-            entryPrice:    trade.entryPrice,
-            volume:        ibPos.position, // use IB's actual fill quantity
-            stopLoss:      trade.stopLoss,
-            takeProfit:    trade.takeProfit,
-            currentPrice:  trade.entryPrice, // will refresh on next updatePositions cycle
-            pnl:           0,
-            pnlPercent:    0,
-            timestamp:     trade.createdAt.getTime(),
-            dbTradeId:     trade.id,
-            parentOrderId: trade.txid ? (parseInt(trade.txid) || undefined) : undefined,
-            slOrderId:     (trade as any).slOrderId ?? undefined,
-            tpOrderId:     (trade as any).tpOrderId ?? undefined,
+            txid:              posId,
+            pair:              trade.pair,
+            type:              trade.type as 'buy' | 'sell',
+            entryPrice:        trade.entryPrice,
+            volume:            ibPos.position,
+            stopLoss:          trade.stopLoss,
+            takeProfit:        trade.takeProfit,
+            currentPrice:      trade.entryPrice,
+            pnl:               0,
+            pnlPercent:        0,
+            timestamp:         trade.createdAt.getTime(),
+            dbTradeId:         trade.id,
+            parentOrderId:     trade.txid ? (parseInt(trade.txid) || undefined) : undefined,
+            slOrderId:         t.slOrderId         ?? undefined,
+            tpOrderId:         t.tpOrderId         ?? undefined,
+            expectedProfitUSD: t.expectedProfitUSD ?? undefined,
+            expectedLossUSD:   t.expectedLossUSD   ?? undefined,
+            riskRewardRatio:   t.riskRewardRatio   ?? undefined,
           });
           recovered++;
-          const slInfo = (trade as any).slOrderId ? ` | SL order #${(trade as any).slOrderId}` : '';
-          const tpInfo = (trade as any).tpOrderId ? ` | TP order #${(trade as any).tpOrderId}` : '';
-          logActivity.info(`✅ Recovered: ${trade.pair} | ${ibPos.position} shares @ $${trade.entryPrice.toFixed(2)} | SL: $${trade.stopLoss.toFixed(2)}${slInfo} | TP: $${trade.takeProfit.toFixed(2)}${tpInfo}`);
+          const slInfo     = t.slOrderId         ? ` | SL order #${t.slOrderId}` : '';
+          const tpInfo     = t.tpOrderId         ? ` | TP order #${t.tpOrderId}` : '';
+          const profitInfo = t.expectedProfitUSD ? ` | 🎯 Target: +$${t.expectedProfitUSD.toFixed(2)}` : '';
+          const lossInfo   = t.expectedLossUSD   ? ` | 🛡️ Max loss: -$${t.expectedLossUSD.toFixed(2)}` : '';
+          logActivity.info(`✅ Recovered: ${trade.pair} | ${ibPos.position} shares @ $${trade.entryPrice.toFixed(2)} | SL: $${trade.stopLoss.toFixed(2)}${slInfo} | TP: $${trade.takeProfit.toFixed(2)}${tpInfo}${profitInfo}${lossInfo}`);
         } else {
           // IB no longer holds shares — closed while bot was offline
           logActivity.warning(`⚠️ ${trade.pair} trade #${trade.id} not in IB positions — marking closed (offline close)`);
