@@ -16,6 +16,18 @@
 
 set -euo pipefail
 
+# ─── Load nvm / local bin ────────────────────────────────────────────────────
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+export PATH="$HOME/.local/bin:$PATH"
+
+# ─── PostgreSQL (user-space install) ─────────────────────────────────────────
+export PG_HOME="$HOME/pg-local/root"
+export PATH="$PG_HOME/usr/lib/postgresql/16/bin:$PATH"
+export LD_LIBRARY_PATH="$PG_HOME/usr/lib/x86_64-linux-gnu:$PG_HOME/usr/lib/postgresql/16/lib:${LD_LIBRARY_PATH:-}"
+export PGDATA="$HOME/pg-local/data"
+export PGHOST="$HOME/pg-local/run"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR"
 PID_DIR="$SCRIPT_DIR/.pids"

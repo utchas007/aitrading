@@ -41,7 +41,7 @@ async function recoverBotIfNeeded() {
       pairs:             config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
       autoExecute:       config.autoExecute ?? false, // default to paper mode on recovery; only live if explicitly saved
       minConfidence:     config.minConfidence ?? 75,
-      maxPositions:      config.maxPositions ?? 5,
+      maxPositions:      config.maxPositions ?? 6,
       riskPerTrade:      config.riskPerTrade ?? 0.05,
       stopLossPercent:   config.stopLossPercent ?? 0.05,
       takeProfitPercent: config.takeProfitPercent ?? 0.10,

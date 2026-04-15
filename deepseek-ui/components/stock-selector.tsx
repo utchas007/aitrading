@@ -99,7 +99,7 @@ interface BotConfig {
 const DEFAULT_CONFIG: BotConfig = {
   autoExecute:       false,
   minConfidence:     75,
-  maxPositions:      4,
+  maxPositions:      6,
   riskPerTrade:      0.10,
   stopLossPercent:   0.05,
   takeProfitPercent: 0.10,

@@ -41,8 +41,10 @@ export async function POST(_req: NextRequest) {
     }
 
     const cadCash       = parseFloat(balance['TotalCashValue_CAD']  ?? balance['TotalCashValue_USD']  ?? '0') || null;
-    const unrealizedPnl = parseFloat(balance['UnrealizedPnL_CAD']  ?? balance['UnrealizedPnL_USD']   ?? '0') || null;
-    const realizedPnl   = parseFloat(balance['RealizedPnL_CAD']    ?? balance['RealizedPnL_USD']     ?? '0') || null;
+
+    // Prefer BASE (true account currency) over CAD/USD — IB often returns 0.00 for CAD even when there's a real value
+    const unrealizedPnl = parseFloat(balance['UnrealizedPnL_BASE'] ?? balance['UnrealizedPnL_CAD']  ?? balance['UnrealizedPnL_USD'] ?? '0') || null;
+    const realizedPnl   = parseFloat(balance['RealizedPnL_BASE']   ?? balance['RealizedPnL_CAD']    ?? balance['RealizedPnL_USD']   ?? '0') || null;
     const buyingPower   = parseFloat(balance['BuyingPower_CAD']     ?? balance['BuyingPower_USD']     ?? '0') || null;
 
     const snapshot = await prisma.portfolioSnapshot.create({

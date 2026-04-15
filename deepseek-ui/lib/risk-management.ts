@@ -40,7 +40,7 @@ export class RiskManager {
       maxPortfolioRisk: params.maxPortfolioRisk || 0.02, // 2% default
       stopLossPercent: params.stopLossPercent || 0.05, // 5% default
       takeProfitPercent: params.takeProfitPercent || 0.10, // 10% default
-      maxOpenPositions: params.maxOpenPositions || 3,
+      maxOpenPositions: params.maxOpenPositions || 6,
       minConfidence: params.minConfidence || 70, // 70% confidence minimum
     };
   }

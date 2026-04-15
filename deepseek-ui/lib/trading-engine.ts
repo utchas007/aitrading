@@ -17,6 +17,25 @@ import {
 import { getMarketSession } from './market-hours';
 import { saveNotification } from './notify';
 
+// Async DB write — persist OHLCV candles, fire and forget, never blocks the bot
+async function savePriceCandles(pair: string, interval: number, priceData: import('./technical-indicators').PriceData[]): Promise<void> {
+  if (!priceData.length) return;
+  try {
+    const { prisma } = await import('./db');
+    await Promise.all(
+      priceData.map(bar =>
+        prisma.priceCandle.upsert({
+          where: { pair_interval_time: { pair, interval, time: Math.floor(bar.timestamp / 1000) } },
+          update: { open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume },
+          create: { pair, interval, time: Math.floor(bar.timestamp / 1000), open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume },
+        })
+      )
+    );
+  } catch (e) {
+    console.error(`[DB] Failed to save price candles for ${pair}:`, e);
+  }
+}
+
 // Async DB write — fire and forget, never blocks the bot
 async function saveSignalToDb(signal: TradeSignal, marketSentiment?: SentimentSummary | null): Promise<void> {
   try {
@@ -119,7 +138,7 @@ export class TradingEngine {
       pairs: config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA'],
       checkInterval: config.checkInterval || 2 * 60 * 1000, // 2 minutes
       minConfidence: config.minConfidence || 75,
-      maxPositions: config.maxPositions || 4,
+      maxPositions: config.maxPositions || 6,
       riskPerTrade: config.riskPerTrade || 0.10, // 10% of available cash per trade
       stopLossPercent: config.stopLossPercent || 0.05, // 5% stop loss
       takeProfitPercent: config.takeProfitPercent || 0.10, // 10% take profit
@@ -433,6 +452,9 @@ export class TradingEngine {
   async generateSignal(pair: string, marketData: Record<string, { price: number; volume: number; change24h: string }>, availableCash: number = 10000): Promise<TradeSignal> {
     // Use daily bars — reliable, no IB pacing issues, good for swing trading signals
     const priceData = await getHistoricalPrices(pair, 1440);
+
+    // Persist candles to DB (fire and forget — never blocks signal generation)
+    savePriceCandles(pair, 1440, priceData).catch(() => {});
 
     if (priceData.length < 50) {
       throw new Error(`Insufficient price data for ${pair}`);
