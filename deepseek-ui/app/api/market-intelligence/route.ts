@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getMarketSentiment, calculatePositionSize } from '@/lib/market-intelligence';
 import { getHistoricalPrices, analyzeTechnicalIndicators } from '@/lib/technical-indicators';
 import { calculateEnhancedIndicators } from '@/lib/market-intelligence';
+import { apiError } from '@/lib/api-response';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/market-intelligence');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -16,6 +21,7 @@ const CACHE_TTL = 60000; // 60 seconds
  * and fee-aware position sizing recommendation.
  */
 export async function GET(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     const { searchParams } = new URL(req.url);
     const pair = searchParams.get('pair') || 'AAPL';
@@ -134,10 +140,8 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json(response);
   } catch (error: any) {
-    console.error('Market intelligence error:', error);
-    return NextResponse.json(
-      { success: false, error: error.message || 'Failed to fetch market intelligence' },
-      { status: 500 }
-    );
+    log.error('Market intelligence error', { error: error.message });
+    return apiError(error.message || 'Failed to fetch market intelligence', 'INTERNAL_ERROR');
   }
+  });
 }

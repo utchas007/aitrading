@@ -2,6 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createTradingEngine } from '@/lib/trading-engine';
 import { getActivityLogger } from '@/lib/activity-logger';
 import { getBotState, setBotRunning, setBotStopped, shouldBotBeRunning } from '@/lib/bot-state';
+import { apiError } from '@/lib/api-response';
+import { TIMEOUTS } from '@/lib/timeouts';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+import { validate, engineControlSchema } from '@/lib/validation';
+
+const log = createLogger('api/trading/engine');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,7 +18,7 @@ const BOT_URL = 'http://localhost:3002';
 // Try standalone bot first, fall back to in-process engine
 async function tryStandaloneBot(path: string, options?: RequestInit): Promise<Response | null> {
   try {
-    const res = await fetch(`${BOT_URL}${path}`, { ...options, signal: AbortSignal.timeout(300) });
+    const res = await fetch(`${BOT_URL}${path}`, { ...options, signal: AbortSignal.timeout(TIMEOUTS.BOT_PROBE_MS) });
     return res;
   } catch {
     return null;
@@ -22,6 +29,10 @@ async function tryStandaloneBot(path: string, options?: RequestInit): Promise<Re
 let engineInstance: ReturnType<typeof createTradingEngine> | null = null;
 let engineRecoveryAttempted = false;
 
+// Mutex: prevents two POST handlers from starting the engine simultaneously
+// (race condition if the UI sends two rapid start requests)
+let engineStartMutex = false;
+
 // Auto-recover bot if it was running before server restart
 async function recoverBotIfNeeded() {
   if (engineRecoveryAttempted) return;
@@ -30,13 +41,13 @@ async function recoverBotIfNeeded() {
   // If standalone bot is already alive, don't start a second in-process instance
   const standaloneAlive = await tryStandaloneBot('/status');
   if (standaloneAlive?.ok) {
-    console.log('[Bot Recovery] Standalone bot is running — skipping in-process recovery');
+    log.info('Standalone bot is running — skipping in-process recovery');
     return;
   }
 
   const { should, config } = await shouldBotBeRunning();
   if (should && config && !engineInstance) {
-    console.log('[Bot Recovery] Restarting bot that was running before server restart...');
+    log.info('Restarting bot that was running before server restart');
     engineInstance = createTradingEngine({
       pairs:             config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
       autoExecute:       config.autoExecute ?? false, // default to paper mode on recovery; only live if explicitly saved
@@ -51,16 +62,19 @@ async function recoverBotIfNeeded() {
       tradeCooldownHours: 1,
       maxDailyTrades:    30,
     });
-    engineInstance.start().catch(err => console.error('Bot recovery error:', err));
-    console.log('[Bot Recovery] Bot restarted successfully');
+    engineInstance.start().catch(err => log.error('Bot recovery start error', { error: String(err) }));
+    log.info('Bot restarted successfully');
   }
 }
 
 // POST - Start/Stop/Control engine
 export async function POST(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
-    const body = await req.json();
-    const { action, config } = body;
+    const rawBody = await req.json();
+    const parsed = validate(rawBody, engineControlSchema);
+    if ('errorResponse' in parsed) return parsed.errorResponse;
+    const { action, config } = parsed.data;
 
     // Try standalone bot first
     const botRes = await tryStandaloneBot('/control', {
@@ -71,7 +85,7 @@ export async function POST(req: NextRequest) {
     if (botRes?.ok) {
       // Standalone accepted the command — stop any in-process instance to prevent duplicates
       if (engineInstance) {
-        console.log('[Engine Route] Standalone bot took over — stopping in-process engine to prevent duplicate');
+        log.info('Standalone bot took over — stopping in-process engine to prevent duplicate');
         engineInstance.stop();
         engineInstance = null;
       }
@@ -86,12 +100,18 @@ export async function POST(req: NextRequest) {
       // Refuse to start in-process if standalone bot is alive — prevents duplicate instances
       const standaloneAlive = await tryStandaloneBot('/status');
       if (standaloneAlive?.ok) {
-        return NextResponse.json({ success: false, error: 'Standalone bot is already running on port 3002. Stop it first.' }, { status: 409 });
+        return apiError('Standalone bot is already running on port 3002. Stop it first.', 'CONFLICT', { status: 409 });
       }
 
       if (engineInstance?.getStatus().isRunning) {
-        return NextResponse.json({ success: false, error: 'Engine is already running' });
+        return apiError('Engine is already running', 'CONFLICT', { status: 409 });
       }
+
+      // Mutex guard — prevent duplicate start requests
+      if (engineStartMutex) {
+        return apiError('Engine start already in progress', 'CONFLICT', { status: 409 });
+      }
+      engineStartMutex = true;
 
       const botConfig = {
         pairs:             config?.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
@@ -108,16 +128,18 @@ export async function POST(req: NextRequest) {
         maxDailyTrades:    config?.maxDailyTrades ?? 30,
       };
 
-      engineInstance = createTradingEngine(botConfig);
-      engineInstance.start().catch(err => console.error('Engine start error:', err));
-      
+      try {
+        engineInstance = createTradingEngine(botConfig);
+        engineInstance.start().catch(err => log.error('Engine start error', { error: String(err) }));
+      } finally {
+        engineStartMutex = false;
+      }
+
       // Persist state to database
-      console.log('[Engine Route] About to call setBotRunning...');
       try {
         await setBotRunning(botConfig);
-        console.log('[Engine Route] setBotRunning completed');
       } catch (e) {
-        console.error('[Engine Route] setBotRunning failed:', e);
+        log.error('setBotRunning failed', { error: String(e) });
       }
 
       return NextResponse.json({
@@ -134,12 +156,10 @@ export async function POST(req: NextRequest) {
       }
       
       // Persist state to database
-      console.log('[Engine Route] About to call setBotStopped...');
       try {
         await setBotStopped();
-        console.log('[Engine Route] setBotStopped completed');
       } catch (e) {
-        console.error('[Engine Route] setBotStopped failed:', e);
+        log.error('setBotStopped failed', { error: String(e) });
       }
       
       // Return stopped status so UI can immediately update
@@ -154,15 +174,17 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ success: false, error: 'Invalid action' }, { status: 400 });
+    return apiError('Invalid action', 'VALIDATION_ERROR', { status: 400 });
   } catch (error: any) {
-    console.error('Engine control error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    log.error('Engine control error', { error: error.message });
+    return apiError(error.message, 'INTERNAL_ERROR');
   }
+  });
 }
 
 // GET - Get engine status and activities
-export async function GET(_req: NextRequest) {
+export async function GET(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     // Try standalone bot first
     const botRes = await tryStandaloneBot('/status');
@@ -188,7 +210,8 @@ export async function GET(_req: NextRequest) {
       startedAt: dbState.startedAt,
     };
     
-    console.log('[Engine GET] Status:', { isEngineRunning, dbIsRunning: dbState.isRunning, finalIsRunning: status.isRunning });
+    // Only log meaningful state changes, not every poll
+    log.debug('Engine GET status polled', { isRunning: status.isRunning, activePositions: status.activePositions });
     
     // Load activities from database if memory is empty
     const logger = getActivityLogger();
@@ -201,7 +224,8 @@ export async function GET(_req: NextRequest) {
       activities: activities.slice(0, 50),
     });
   } catch (error: any) {
-    console.error('Engine status error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    log.error('Engine status error', { error: error.message });
+    return apiError(error.message, 'INTERNAL_ERROR');
   }
+  });
 }

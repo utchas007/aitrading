@@ -4,6 +4,12 @@
  * Run: python ib_service.py  (must be running before using these functions)
  */
 
+import { createLogger } from './logger';
+import { getRequestId } from './correlation';
+import { ibBalanceCache } from './cache';
+
+const log = createLogger('ib-client');
+
 const IB_SERVICE_URL = process.env.IB_SERVICE_URL || 'http://localhost:8765';
 
 export interface IBBalance {
@@ -122,12 +128,73 @@ const IB_API_KEY = process.env.IB_API_KEY;
 // Retry delays in ms: 500 → 1000 → 2000 (3 attempts after the initial try)
 const RETRY_DELAYS = [500, 1000, 2000];
 
+// ─── Circuit Breaker ──────────────────────────────────────────────────────────
+// Prevents cascading failures when ib_service.py is down.
+// States: CLOSED (normal) → OPEN (tripped, fail fast) → HALF_OPEN (probe recovery)
+type CBState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+
+const circuitBreaker = {
+  state:            'CLOSED' as CBState,
+  failures:         0,
+  lastFailureTime:  0,
+  FAILURE_THRESHOLD:    3,        // open after 3 consecutive full-request failures
+  RECOVERY_TIMEOUT_MS:  30_000,   // 30s before entering HALF_OPEN and probing
+};
+
+function cbRecordSuccess() {
+  if (circuitBreaker.state !== 'CLOSED') {
+    log.info('Circuit breaker CLOSED — service recovered');
+  }
+  circuitBreaker.state    = 'CLOSED';
+  circuitBreaker.failures = 0;
+}
+
+function cbRecordFailure() {
+  circuitBreaker.failures++;
+  circuitBreaker.lastFailureTime = Date.now();
+  if (circuitBreaker.failures >= circuitBreaker.FAILURE_THRESHOLD) {
+    if (circuitBreaker.state !== 'OPEN') {
+      log.error('Circuit breaker OPEN — fast-failing requests', {
+        failures: circuitBreaker.failures,
+        recoverySec: circuitBreaker.RECOVERY_TIMEOUT_MS / 1000,
+      });
+    }
+    circuitBreaker.state = 'OPEN';
+  }
+}
+
+function cbIsAllowed(): boolean {
+  if (circuitBreaker.state === 'CLOSED') return true;
+
+  const elapsed = Date.now() - circuitBreaker.lastFailureTime;
+  if (circuitBreaker.state === 'OPEN' && elapsed >= circuitBreaker.RECOVERY_TIMEOUT_MS) {
+    circuitBreaker.state = 'HALF_OPEN';
+    log.info('Circuit breaker HALF_OPEN — probing recovery');
+    return true;
+  }
+
+  return circuitBreaker.state === 'HALF_OPEN'; // probe already in progress
+}
+
+// ─── Fetch with retry + circuit breaker ──────────────────────────────────────
 async function ibFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  // Circuit breaker check — fail fast if IB is known-down
+  if (!cbIsAllowed()) {
+    const secsLeft = Math.ceil(
+      (circuitBreaker.RECOVERY_TIMEOUT_MS - (Date.now() - circuitBreaker.lastFailureTime)) / 1000
+    );
+    throw new Error(
+      `IB service circuit breaker is OPEN — too many recent failures. Will retry in ${secsLeft}s.`
+    );
+  }
+
+  const reqId = getRequestId();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options?.headers as Record<string, string> ?? {}),
   };
   if (IB_API_KEY) headers['X-API-Key'] = IB_API_KEY;
+  if (reqId !== '-') headers['X-Request-ID'] = reqId;
 
   let lastError: Error | undefined;
 
@@ -135,7 +202,7 @@ async function ibFetch<T>(path: string, options?: RequestInit): Promise<T> {
     try {
       const res = await fetch(`${IB_SERVICE_URL}${path}`, { ...options, headers });
 
-      // 4xx = client/logic error — don't retry, fail immediately
+      // 4xx = client/logic error — don't retry, fail immediately (not a connectivity issue)
       if (res.status >= 400 && res.status < 500) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(`IB Service error ${res.status}: ${err.detail ?? JSON.stringify(err)}`);
@@ -146,6 +213,7 @@ async function ibFetch<T>(path: string, options?: RequestInit): Promise<T> {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         lastError = new Error(`IB Service error ${res.status}: ${err.detail ?? JSON.stringify(err)}`);
       } else {
+        cbRecordSuccess();
         return res.json() as Promise<T>;
       }
     } catch (e: any) {
@@ -159,6 +227,8 @@ async function ibFetch<T>(path: string, options?: RequestInit): Promise<T> {
     }
   }
 
+  // All retries exhausted — record failure against the circuit breaker
+  cbRecordFailure();
   throw lastError ?? new Error(`IB Service unreachable after ${RETRY_DELAYS.length + 1} attempts`);
 }
 
@@ -169,9 +239,10 @@ export function createIBClient() {
       return ibFetch<{ connected: boolean; host: string; port: number; accounts: string[] }>('/health');
     },
 
-    /** Account balances (cash, net liquidation, buying power, PnL …) */
+    /** Account balances (cash, net liquidation, buying power, PnL …).
+     *  Cached for 30 seconds — balance doesn't change between tick by tick. */
     async getBalance(): Promise<IBBalance> {
-      return ibFetch<IBBalance>('/balance');
+      return ibBalanceCache.getOrFetch('balance', () => ibFetch<IBBalance>('/balance'));
     },
 
     /** All open positions */

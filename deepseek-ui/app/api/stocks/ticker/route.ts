@@ -1,4 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { apiError } from '@/lib/api-response';
+import { TIMEOUTS } from '@/lib/timeouts';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/stocks/ticker');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -25,10 +31,25 @@ function setCachedPrice(symbol: string, data: any): void {
  * Uses 10-second cache to speed up dashboard refresh
  */
 export async function GET(req: NextRequest) {
-  const symbols = req.nextUrl.searchParams.get('symbols')?.split(',') || [];
+  return withCorrelation(req, async () => {
+  const rawSymbols = req.nextUrl.searchParams.get('symbols')?.split(',') || [];
   
+  if (rawSymbols.length === 0) {
+    return apiError('No symbols provided', 'VALIDATION_ERROR', { status: 400 });
+  }
+
+  // Validate and sanitize symbol format: 1-10 uppercase alphanumeric chars
+  const SYMBOL_RE = /^[A-Z0-9]{1,10}$/;
+  const symbols = rawSymbols
+    .map(s => s.trim().toUpperCase())
+    .filter(s => SYMBOL_RE.test(s));
+
   if (symbols.length === 0) {
-    return NextResponse.json({ success: false, error: 'No symbols provided' }, { status: 400 });
+    return apiError(
+      'No valid symbols provided. Symbols must be 1–10 uppercase letters (e.g. AAPL, MSFT).',
+      'VALIDATION_ERROR',
+      { status: 400 },
+    );
   }
 
   const results: Record<string, any> = {};
@@ -62,7 +83,7 @@ export async function GET(req: NextRequest) {
       // Try IB first
       try {
         const ibRes = await fetch(`http://localhost:8765/ticker/${sym}?sec_type=STK&exchange=SMART&currency=USD`, {
-          signal: AbortSignal.timeout(3000),
+          signal: AbortSignal.timeout(TIMEOUTS.TICKER_MS),
         });
         if (ibRes.ok) {
           const data = await ibRes.json();
@@ -93,7 +114,7 @@ export async function GET(req: NextRequest) {
           `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=2d`,
           {
             headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)' },
-            signal: AbortSignal.timeout(5000),
+            signal: AbortSignal.timeout(TIMEOUTS.TICKER_MS),
           }
         );
         if (yahooRes.ok) {
@@ -124,7 +145,7 @@ export async function GET(req: NextRequest) {
           }
         }
       } catch (e) {
-        console.error(`Failed to fetch ${sym}:`, e);
+        log.error('Failed to fetch ticker', { sym, error: String(e) });
       }
     })
   );
@@ -133,5 +154,6 @@ export async function GET(req: NextRequest) {
     success: true,
     data: results,
     count: Object.keys(results).length,
+  });
   });
 }

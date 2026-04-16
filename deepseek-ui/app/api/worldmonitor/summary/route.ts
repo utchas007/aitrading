@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getWorldMonitorSummary, getMarketContextForAI } from '@/lib/worldmonitor-data';
+import { apiError } from '@/lib/api-response';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/worldmonitor/summary');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -9,20 +14,19 @@ export const dynamic = 'force-dynamic';
  * Returns complete World Monitor data summary for trading analysis
  */
 export async function GET(req: NextRequest) {
-  try {
-    const summary = await getWorldMonitorSummary();
-    const aiContext = await getMarketContextForAI();
+  return withCorrelation(req, async () => {
+    try {
+      const summary = await getWorldMonitorSummary();
+      const aiContext = await getMarketContextForAI();
 
-    return NextResponse.json({
-      success: true,
-      ...summary,
-      aiContext,
-    });
-  } catch (error: any) {
-    console.error('World Monitor summary error:', error);
-    return NextResponse.json({
-      success: false,
-      error: error.message,
-    }, { status: 500 });
-  }
+      return NextResponse.json({
+        success: true,
+        ...summary,
+        aiContext,
+      });
+    } catch (error: any) {
+      log.error('World Monitor summary error', { error: error.message });
+      return apiError(error.message, 'EXTERNAL_API_ERROR');
+    }
+  });
 }

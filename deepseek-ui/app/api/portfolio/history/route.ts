@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
+import { apiError } from '@/lib/api-response';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/portfolio/history');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -9,6 +14,7 @@ export const dynamic = 'force-dynamic';
  * Returns IB portfolio history from PostgreSQL
  */
 export async function GET(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     const { searchParams } = new URL(req.url);
     const days  = parseInt(searchParams.get('days')  || '7');
@@ -64,10 +70,8 @@ export async function GET(req: NextRequest) {
       },
     });
   } catch (error: any) {
-    console.error('Portfolio history error:', error);
-    return NextResponse.json(
-      { success: false, error: error.message, history: [] },
-      { status: 500 },
-    );
+    log.error('Portfolio history error', { error: error.message });
+    return apiError(error.message, 'DB_ERROR', { extra: { history: [] } });
   }
+  });
 }

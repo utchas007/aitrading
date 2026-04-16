@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { apiError } from '@/lib/api-response';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/chat/history');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -9,6 +14,7 @@ export const dynamic = 'force-dynamic';
  * GET /api/chat/history?id=123 - Get specific conversation with messages
  */
 export async function GET(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     const id = req.nextUrl.searchParams.get('id');
 
@@ -24,7 +30,7 @@ export async function GET(req: NextRequest) {
       });
 
       if (!conversation) {
-        return NextResponse.json({ success: false, error: 'Conversation not found' }, { status: 404 });
+        return apiError('Conversation not found', 'NOT_FOUND', { status: 404 });
       }
 
       return NextResponse.json({ success: true, conversation });
@@ -56,9 +62,10 @@ export async function GET(req: NextRequest) {
       })),
     });
   } catch (error: any) {
-    console.error('Chat history GET error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    log.error('Chat history GET error', { error: error.message });
+    return apiError(error.message, 'DB_ERROR');
   }
+  });
 }
 
 /**
@@ -68,6 +75,7 @@ export async function GET(req: NextRequest) {
  * Body: { action: 'rename', conversationId: 123, title: 'New Title' }
  */
 export async function POST(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     const body = await req.json();
     const { action } = body;
@@ -86,7 +94,7 @@ export async function POST(req: NextRequest) {
       const { conversationId, role, content, tokens, error } = body;
       
       if (!conversationId || !role || !content) {
-        return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
+        return apiError('Missing required fields', 'VALIDATION_ERROR', { status: 400 });
       }
 
       const message = await prisma.chatMessage.create({
@@ -120,22 +128,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, conversation });
     }
 
-    return NextResponse.json({ success: false, error: 'Invalid action' }, { status: 400 });
+    return apiError('Invalid action', 'VALIDATION_ERROR', { status: 400 });
   } catch (error: any) {
-    console.error('Chat history POST error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    log.error('Chat history POST error', { error: error.message });
+    return apiError(error.message, 'DB_ERROR');
   }
+  });
 }
 
 /**
  * DELETE /api/chat/history?id=123 - Delete a conversation
  */
 export async function DELETE(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     const id = req.nextUrl.searchParams.get('id');
-    
+
     if (!id) {
-      return NextResponse.json({ success: false, error: 'ID required' }, { status: 400 });
+      return apiError('ID required', 'VALIDATION_ERROR', { status: 400 });
     }
 
     await prisma.chatConversation.delete({
@@ -144,7 +154,8 @@ export async function DELETE(req: NextRequest) {
 
     return NextResponse.json({ success: true, deleted: parseInt(id) });
   } catch (error: any) {
-    console.error('Chat history DELETE error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    log.error('Chat history DELETE error', { error: error.message });
+    return apiError(error.message, 'DB_ERROR');
   }
+  });
 }

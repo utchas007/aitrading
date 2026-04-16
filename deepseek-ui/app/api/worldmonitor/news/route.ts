@@ -1,4 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/worldmonitor/news');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -81,6 +85,7 @@ function decodeXmlEntities(s: string): string {
 }
 
 export async function GET(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     const { searchParams } = new URL(req.url);
     const category = searchParams.get('category') || 'markets';
@@ -113,7 +118,7 @@ export async function GET(req: NextRequest) {
           allNews.push(...items);
         }
       } catch (error) {
-        console.warn(`Failed to fetch ${feed.name}:`, error);
+        log.warn('Failed to fetch RSS feed', { feed: feed.name, error: String(error) });
       }
     }
 
@@ -133,7 +138,7 @@ export async function GET(req: NextRequest) {
     // If all feeds failed, use fallback
     throw new Error('All RSS feeds failed');
   } catch (error: any) {
-    console.warn('RSS feeds unavailable, using mock financial news');
+    log.warn('RSS feeds unavailable, using mock financial news');
     
     // Return mock data if worldmonitor is unavailable
     const mockNews: NewsItem[] = [
@@ -171,4 +176,5 @@ export async function GET(req: NextRequest) {
       note: 'Using mock data - worldmonitor API unavailable',
     });
   }
+  });
 }

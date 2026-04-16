@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/db';
+import { apiError } from '@/lib/api-response';
+import { TIMEOUTS } from '@/lib/timeouts';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/portfolio/snapshot');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -10,17 +16,15 @@ const IB_SERVICE_URL = process.env.IB_SERVICE_URL || 'http://localhost:8765';
  * POST /api/portfolio/snapshot
  * Save a portfolio snapshot using IB account balance.
  */
-export async function POST(_req: NextRequest) {
+export async function POST(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     const res = await fetch(`${IB_SERVICE_URL}/balance`, {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
 
     if (!res.ok) {
-      return NextResponse.json(
-        { success: false, error: 'IB service unavailable' },
-        { status: 503 },
-      );
+      return apiError('IB service unavailable', 'SERVICE_UNAVAILABLE', { status: 503 });
     }
 
     const balance = await res.json();
@@ -34,10 +38,7 @@ export async function POST(_req: NextRequest) {
 
     const totalValue = parseFloat(totalValueStr);
     if (!totalValue) {
-      return NextResponse.json(
-        { success: false, error: 'Could not determine portfolio value from IB balance' },
-        { status: 422 },
-      );
+      return apiError('Could not determine portfolio value from IB balance', 'EXTERNAL_API_ERROR', { status: 422 });
     }
 
     const cadCash       = parseFloat(balance['TotalCashValue_CAD']  ?? balance['TotalCashValue_USD']  ?? '0') || null;
@@ -66,10 +67,8 @@ export async function POST(_req: NextRequest) {
       },
     });
   } catch (error: any) {
-    console.error('Portfolio snapshot error:', error);
-    return NextResponse.json(
-      { success: false, error: error.message },
-      { status: 500 },
-    );
+    log.error('Portfolio snapshot error', { error: error.message });
+    return apiError(error.message, 'INTERNAL_ERROR');
   }
+  });
 }

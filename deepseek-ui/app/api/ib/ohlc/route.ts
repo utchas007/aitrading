@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { apiError } from '@/lib/api-response';
+import { TIMEOUTS } from '@/lib/timeouts';
+import { withCorrelation } from '@/lib/correlation';
 
 const IB_SERVICE_URL = process.env.IB_SERVICE_URL || 'http://localhost:8765';
 
@@ -40,7 +43,7 @@ async function fetchFromYahoo(symbol: string, barSize: string, duration: string)
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
   const res = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)' },
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(TIMEOUTS.HISTORICAL_MS),
   });
   if (!res.ok) throw new Error(`Yahoo Finance HTTP ${res.status}`);
   const data = await res.json();
@@ -63,48 +66,50 @@ async function fetchFromYahoo(symbol: string, barSize: string, duration: string)
 
 // GET /api/ib/ohlc?symbol=AAPL&barSize=1+hour&duration=10+D
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const symbol   = searchParams.get('symbol');
-  const secType  = searchParams.get('secType')  ?? 'STK';
-  const exchange = searchParams.get('exchange') ?? 'SMART';
-  const currency = searchParams.get('currency') ?? 'USD';
-  const barSize  = searchParams.get('barSize')  ?? '1 hour';
-  const duration = searchParams.get('duration') ?? '10 D';
+  return withCorrelation(req, async () => {
+    const { searchParams } = new URL(req.url);
+    const symbol   = searchParams.get('symbol');
+    const secType  = searchParams.get('secType')  ?? 'STK';
+    const exchange = searchParams.get('exchange') ?? 'SMART';
+    const currency = searchParams.get('currency') ?? 'USD';
+    const barSize  = searchParams.get('barSize')  ?? '1 hour';
+    const duration = searchParams.get('duration') ?? '10 D';
 
-  if (!symbol) {
-    return NextResponse.json({ success: false, error: 'symbol is required' }, { status: 400 });
-  }
-
-  // Check cache first
-  const cacheKey = getCacheKey(symbol, barSize, duration);
-  const cached = getCachedOHLC(cacheKey);
-  if (cached) {
-    return NextResponse.json({ ...cached, cached: true });
-  }
-
-  // Try IB first
-  try {
-    const params = new URLSearchParams({ sec_type: secType, exchange, currency, bar_size: barSize, duration });
-    const ibRes = await fetch(`${IB_SERVICE_URL}/ohlc/${symbol}?${params}`, {
-      signal: AbortSignal.timeout(20000),
-    });
-    if (ibRes.ok) {
-      const bars = await ibRes.json();
-      if (Array.isArray(bars) && bars.length > 0) {
-        const response = { success: true, bars, source: 'ib' };
-        setCachedOHLC(cacheKey, response);
-        return NextResponse.json(response);
-      }
+    if (!symbol) {
+      return apiError('symbol is required', 'VALIDATION_ERROR', { status: 400 });
     }
-  } catch { /* fall through to Yahoo */ }
 
-  // Fallback: Yahoo Finance (free, no subscription needed)
-  try {
-    const bars = await fetchFromYahoo(symbol, barSize, duration);
-    const response = { success: true, bars, source: 'yahoo' };
-    setCachedOHLC(cacheKey, response);
-    return NextResponse.json(response);
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
-  }
+    // Check cache first
+    const cacheKey = getCacheKey(symbol, barSize, duration);
+    const cached = getCachedOHLC(cacheKey);
+    if (cached) {
+      return NextResponse.json({ ...cached, cached: true });
+    }
+
+    // Try IB first
+    try {
+      const params = new URLSearchParams({ sec_type: secType, exchange, currency, bar_size: barSize, duration });
+      const ibRes = await fetch(`${IB_SERVICE_URL}/ohlc/${symbol}?${params}`, {
+        signal: AbortSignal.timeout(TIMEOUTS.HISTORICAL_MS),
+      });
+      if (ibRes.ok) {
+        const bars = await ibRes.json();
+        if (Array.isArray(bars) && bars.length > 0) {
+          const response = { success: true, bars, source: 'ib' };
+          setCachedOHLC(cacheKey, response);
+          return NextResponse.json(response);
+        }
+      }
+    } catch { /* fall through to Yahoo */ }
+
+    // Fallback: Yahoo Finance (free, no subscription needed)
+    try {
+      const bars = await fetchFromYahoo(symbol, barSize, duration);
+      const response = { success: true, bars, source: 'yahoo' };
+      setCachedOHLC(cacheKey, response);
+      return NextResponse.json(response);
+    } catch (err: any) {
+      return apiError(err.message, 'EXTERNAL_API_ERROR');
+    }
+  });
 }

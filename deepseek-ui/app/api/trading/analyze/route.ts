@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getMarketSession } from '@/lib/market-hours';
+import { apiError } from '@/lib/api-response';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+import { validate, tradingAnalysisSchema } from '@/lib/validation';
+
+const log = createLogger('api/trading/analyze');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -33,16 +39,12 @@ interface AnalysisRequest {
 }
 
 export async function POST(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
-    const body: AnalysisRequest = await req.json();
-    const { news, marketData, pair, assetType = 'crypto', technicals, worldContext } = body;
-
-    if (!news || !marketData || !pair) {
-      return NextResponse.json(
-        { success: false, error: 'Missing required fields: news, marketData, pair' },
-        { status: 400 }
-      );
-    }
+    const rawBody = await req.json();
+    const parsed = validate(rawBody, tradingAnalysisSchema);
+    if ('errorResponse' in parsed) return parsed.errorResponse;
+    const { news, marketData, pair, assetType = 'crypto', technicals, worldContext } = parsed.data;
 
     const isStock = assetType === 'stock';
     const analystType = isStock ? 'expert stock market analyst' : 'expert cryptocurrency trading analyst';
@@ -172,7 +174,7 @@ Format your response as JSON with these fields:
         };
       }
     } catch (parseError) {
-      console.error('Failed to parse AI response:', parseError);
+      log.warn('Failed to parse AI response', { error: String(parseError) });
       analysis = {
         sentiment: 'Neutral',
         confidence: 50,
@@ -193,10 +195,8 @@ Format your response as JSON with these fields:
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    console.error('Trading analysis error:', error);
-    return NextResponse.json(
-      { success: false, error: error.message || 'Failed to analyze trading data' },
-      { status: 500 }
-    );
+    log.error('Trading analysis error', { error: error.message });
+    return apiError(error.message || 'Failed to analyze trading data', 'INTERNAL_ERROR');
   }
+  });
 }

@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { TIMEOUTS } from '@/lib/timeouts';
+import { withCorrelation } from '@/lib/correlation';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -20,6 +22,7 @@ interface HealthStatus {
 }
 
 export async function GET(req: NextRequest) {
+  return withCorrelation(req, async () => {
   const startTime = Date.now();
   
   const status: HealthStatus = {
@@ -37,7 +40,7 @@ export async function GET(req: NextRequest) {
   try {
     // Check if World Monitor is reachable
     const wmCheck = await fetch(WORLDMONITOR_URL, {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     
     if (wmCheck.ok) {
@@ -50,7 +53,7 @@ export async function GET(req: NextRequest) {
   // Check news API (through our proxy)
   try {
     const newsRes = await fetch('http://localhost:3001/api/worldmonitor/news?category=markets&limit=1', {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     if (newsRes.ok) {
       const data = await newsRes.json();
@@ -64,7 +67,7 @@ export async function GET(req: NextRequest) {
   try {
     const indicesRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=1d', {
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     if (indicesRes.ok) {
       const data = await indicesRes.json();
@@ -78,7 +81,7 @@ export async function GET(req: NextRequest) {
   try {
     const commoditiesRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d&range=1d', {
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     if (commoditiesRes.ok) {
       const data = await commoditiesRes.json();
@@ -106,5 +109,6 @@ export async function GET(req: NextRequest) {
       servicesActive: servicesWorking,
       servicesTotal: 4,
     },
+  });
   });
 }

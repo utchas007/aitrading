@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createKrakenClient } from '@/lib/kraken';
 import { logActivity } from '@/lib/activity-logger';
+import { apiError } from '@/lib/api-response';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/test-trade');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -9,6 +14,7 @@ export const dynamic = 'force-dynamic';
  * Test trade endpoint - Buy $10 worth of TAO
  */
 export async function POST(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     logActivity.info('🧪 Starting test trade: Buying $10 worth of TAO...');
     
@@ -61,15 +67,10 @@ export async function POST(req: NextRequest) {
     });
     
   } catch (error: any) {
-    console.error('Test trade failed:', error);
+    log.error('Test trade failed', { error: error.message });
     logActivity.error(`❌ Test trade failed: ${error.message}`);
-    
-    return NextResponse.json(
-      {
-        success: false,
-        error: error.message,
-      },
-      { status: 500 }
-    );
+
+    return apiError(error.message, 'KRAKEN_ERROR');
   }
+  });
 }

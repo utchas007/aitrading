@@ -1,4 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { apiError } from '@/lib/api-response';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+
+const log = createLogger('api/worldmonitor/data');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -10,6 +15,7 @@ const WORLDMONITOR_BASE_URL = process.env.WORLDMONITOR_URL || 'http://localhost:
  * This integrates stock indices, commodities, forex, and crypto data into the trading bot
  */
 export async function GET(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
     const { searchParams } = new URL(req.url);
     const category = searchParams.get('category') || 'finance';
@@ -44,11 +50,10 @@ export async function GET(req: NextRequest) {
       },
     });
   } catch (error: any) {
-    console.error('World Monitor finance fetch error:', error);
-    return NextResponse.json({
-      success: false,
-      error: error.message,
-      note: 'World Monitor may not be running on port 3000. Start it with: bash /home/aiminer2/start-worldmonitor-local.sh',
-    }, { status: 500 });
+    log.error('World Monitor finance fetch error', { error: error.message });
+    return apiError(error.message, 'SERVICE_UNAVAILABLE', {
+      extra: { note: 'World Monitor may not be running on port 3000. Start it with: bash /home/aiminer2/start-worldmonitor-local.sh' },
+    });
   }
+  });
 }

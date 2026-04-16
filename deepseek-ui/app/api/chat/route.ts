@@ -1,7 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createKrakenClient } from '@/lib/kraken';
 import { createIBClient } from '@/lib/ib-client';
 import { getMarketContextForAI } from '@/lib/worldmonitor-data';
+import { apiError } from '@/lib/api-response';
+import { TIMEOUTS } from '@/lib/timeouts';
+import { createLogger } from '@/lib/logger';
+import { withCorrelation } from '@/lib/correlation';
+import { validate } from '@/lib/validation';
+
+const chatRequestSchema = z.object({
+  messages: z
+    .array(
+      z.object({
+        role:    z.enum(['user', 'assistant', 'system']),
+        content: z.string().min(1).max(20_000).trim(),
+      }),
+    )
+    .min(1, 'At least one message required')
+    .max(100, 'Too many messages in context (max 100)'),
+  model:       z.string().max(100).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  max_tokens:  z.number().int().min(1).max(32_000).optional(),
+  system:      z.string().max(10_000).optional(),
+});
+
+const log = createLogger('api/chat');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -93,7 +117,7 @@ async function getLatestPrice(symbol: string): Promise<number | null> {
   try {
     const res = await fetch(
       `http://localhost:8765/ohlc/${symbol}?bar_size=5+mins&duration=1+D`,
-      { signal: AbortSignal.timeout(10000) }
+      { signal: AbortSignal.timeout(TIMEOUTS.HISTORICAL_MS) }
     );
     if (!res.ok) return null;
     const bars: Array<{ close: number }> = await res.json();
@@ -247,7 +271,7 @@ async function executeTradeCommand(cmd: ParsedCommand): Promise<TradeCommandResu
         },
       });
     } catch (dbErr: any) {
-      console.error('[CHAT] Failed to save trade to DB:', dbErr.message);
+      log.error('Failed to save trade to DB', { error: dbErr.message });
     }
 
     return {
@@ -265,12 +289,12 @@ async function executeTradeCommand(cmd: ParsedCommand): Promise<TradeCommandResu
 }
 
 export async function POST(req: NextRequest) {
+  return withCorrelation(req, async () => {
   try {
-    const { messages, model = 'deepseek-r1:14b', temperature = 0.7, max_tokens = 6000, system } = await req.json();
-
-    if (!messages || messages.length === 0) {
-      return NextResponse.json({ error: 'Messages are required' }, { status: 400 });
-    }
+    const rawBody = await req.json();
+    const parsed = validate(rawBody, chatRequestSchema);
+    if ('errorResponse' in parsed) return parsed.errorResponse;
+    const { messages, model = 'deepseek-r1:14b', temperature = 0.7, max_tokens = 6000, system } = parsed.data;
 
     // ── Detect & execute trade commands from the latest user message ──────────
     const lastUserMsg = [...messages].reverse().find((m: any) => m.role === 'user');
@@ -279,14 +303,14 @@ export async function POST(req: NextRequest) {
       const cmd = parseTradeCommand(lastUserMsg.content);
       if (cmd) {
         tradeResult = await executeTradeCommand(cmd);
-        console.log('[CHAT] Trade command executed:', tradeResult);
+        log.info('Trade command executed', { executed: tradeResult.executed, symbol: tradeResult.symbol, action: tradeResult.action });
       }
     }
 
     // Fetch real-time market data
     const t0 = Date.now();
     const marketContext = await fetchMarketContext();
-    console.log(`[CHAT] Data fetch took ${Date.now() - t0}ms`);
+    log.debug('Market data fetch complete', { ms: Date.now() - t0 });
 
     // Build time context so AI knows current date, time, and market session
     const now = new Date();
@@ -454,12 +478,10 @@ DO NOT say you don't have access to markets, finance, or tech - you absolutely d
       tokens: estimatedTokens,
     });
   } catch (error: any) {
-    console.error('Chat API error:', error);
-    return NextResponse.json(
-      { error: error.message || 'Failed to generate response' },
-      { status: 500 }
-    );
+    log.error('Chat API error', { error: error.message });
+    return apiError(error.message || 'Failed to generate response', 'INTERNAL_ERROR');
   }
+  });
 }
 
 // Key stocks to always include in context
@@ -518,7 +540,7 @@ async function fetchStockContext(): Promise<string> {
         const res = await fetchWithTimeout(
           fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=2d`, {
             headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(3000),
+            signal: AbortSignal.timeout(TIMEOUTS.TICKER_MS),
           }).then(r => r.json()),
           3500,
           null
@@ -544,7 +566,7 @@ async function fetchStockContext(): Promise<string> {
 
     return context;
   } catch (error) {
-    console.error('Failed to fetch IB stock context:', error);
+    log.error('Failed to fetch IB stock context', { error: String(error) });
     return '\n=== IB STOCK DATA ===\nData temporarily unavailable.\n';
   }
 }
@@ -586,23 +608,23 @@ async function fetchCryptoContext(): Promise<string> {
       fetchWithTimeout(kraken.getTradeBalance(), 4000, { eb: '0', tb: '0', m: '0', n: '0', c: '0', v: '0', e: '0', mf: '0' }),
       fetchWithTimeout(kraken.getTicker(['XXBTZCAD', 'XETHZCAD', 'SOLCAD']), 4000, {}),
       fetchWithTimeout(
-        fetch('http://localhost:3001/api/worldmonitor/news?category=markets&limit=5', { signal: AbortSignal.timeout(3000) })
+        fetch('http://localhost:3001/api/worldmonitor/news?category=markets&limit=5', { signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS) })
           .then(r => r.json()).catch(() => ({ success: false })),
-        4000, { success: false }
+        TIMEOUTS.HEALTH_MS + 1000, { success: false }
       ),
       fetchWithTimeout(
-        fetch('http://localhost:3001/api/trading/engine', { signal: AbortSignal.timeout(3000) })
+        fetch('http://localhost:3001/api/trading/engine', { signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS) })
           .then(r => r.json()).catch(() => ({ success: false })),
-        4000, { success: false }
+        TIMEOUTS.HEALTH_MS + 1000, { success: false }
       ),
       fetchWithTimeout(
         fetch('http://localhost:3000/api/conflict/v1/worldmonitor.conflict.v1.ConflictService/ListConflicts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ limit: 5 }),
-          signal: AbortSignal.timeout(3000),
+          signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
         }).then(r => r.json()).catch(() => ({})),
-        4000, {}
+        TIMEOUTS.HEALTH_MS + 1000, {}
       ),
     ]);
 
@@ -651,7 +673,7 @@ async function fetchCryptoContext(): Promise<string> {
     
     return context;
   } catch (error) {
-    console.error('Failed to fetch crypto market context:', error);
+    log.error('Failed to fetch crypto market context', { error: String(error) });
     return 'Crypto market data temporarily unavailable.';
   }
 }
