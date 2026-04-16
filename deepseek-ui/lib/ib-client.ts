@@ -103,6 +103,32 @@ export interface PlaceBracketOrderRequest {
   validate_only?: boolean;
 }
 
+export interface PlaceOcaOrderRequest {
+  symbol: string;
+  sec_type?: 'STK' | 'CRYPTO' | 'CASH' | 'FUT' | 'OPT';
+  exchange?: string;
+  currency?: string;
+  quantity: number;
+  stop_price: number;
+  limit_price: number;
+  action?: 'SELL' | 'BUY';
+  validate_only?: boolean;
+}
+
+export interface PlaceOcaOrderResult {
+  validate_only: boolean;
+  symbol: string;
+  oca_group: string;
+  stop_price: number;
+  limit_price: number;
+  stop_order_id?: number;
+  limit_order_id?: number;
+  stop_status?: string;
+  limit_status?: string;
+  init_margin?: string;
+  commission?: string;
+}
+
 export interface PlaceBracketOrderResult {
   validate_only: boolean;
   symbol: string;
@@ -305,6 +331,19 @@ export function createIBClient() {
      */
     async placeBracketOrder(req: PlaceBracketOrderRequest): Promise<PlaceBracketOrderResult> {
       return ibFetch<PlaceBracketOrderResult>('/bracket-order', {
+        method: 'POST',
+        body: JSON.stringify({ validate_only: true, ...req }),
+      });
+    },
+
+    /**
+     * Place two exit orders (STP + LMT) linked in an OCA group.
+     * When one fills, IB automatically cancels the other — prevents accidental shorts
+     * on positions where a bracket order can't be used (e.g. recovered positions).
+     * validate_only defaults to true — no real orders sent unless explicitly false.
+     */
+    async placeOcaOrder(req: PlaceOcaOrderRequest): Promise<PlaceOcaOrderResult> {
+      return ibFetch<PlaceOcaOrderResult>('/oca-order', {
         method: 'POST',
         body: JSON.stringify({ validate_only: true, ...req }),
       });

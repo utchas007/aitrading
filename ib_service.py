@@ -746,6 +746,98 @@ async def place_bracket_order(req: BracketOrderRequest):
     }
 
 
+class OcaOrderRequest(BaseModel):
+    symbol: str
+    sec_type: str = "STK"
+    exchange: str = "SMART"
+    currency: str = "USD"
+    quantity: float
+    stop_price: float    # STP order trigger price
+    limit_price: float   # LMT order target price
+    action: str = "SELL" # direction of both exit orders
+    validate_only: bool = True
+
+
+@app.post("/oca-order")
+async def place_oca_order(req: OcaOrderRequest):
+    """
+    Place two exit orders (STP + LMT) linked in an OCA group.
+    When one fills, IB automatically cancels the other — preventing
+    accidental short positions when both stop and take-profit are live.
+    validate_only=true (default) → dry-run only.
+    validate_only=false          → REAL orders.
+    """
+    await ensure_connected()
+
+    action = req.action.upper()
+    oca_group = f"{req.symbol}_EXIT_{ib.client.getReqId()}"
+
+    async def _execute():
+        contract = await _get_contract(req.symbol, req.sec_type, req.exchange, req.currency)
+        if contract is None:
+            return None
+
+        stop = StopOrder(action, req.quantity, round(req.stop_price, 2))
+        stop.orderId   = ib.client.getReqId()
+        stop.tif       = "GTC"
+        stop.ocaGroup  = oca_group
+        stop.ocaType   = 1   # cancel remaining orders with block
+
+        limit = LimitOrder(action, req.quantity, round(req.limit_price, 2))
+        limit.orderId  = ib.client.getReqId()
+        limit.tif      = "GTC"
+        limit.ocaGroup = oca_group
+        limit.ocaType  = 1
+
+        if req.validate_only:
+            stop.whatIf = True
+            what_if = await ib.whatIfOrderAsync(contract, stop)
+            return {"what_if": what_if}
+
+        stop_trade  = ib.placeOrder(contract, stop)
+        limit_trade = ib.placeOrder(contract, limit)
+
+        for _ in range(10):
+            await asyncio.sleep(1)
+            if stop_trade.orderStatus.status not in ("PendingSubmit", "PreSubmitted", ""):
+                break
+
+        return {
+            "stop_order_id":  stop_trade.order.orderId,
+            "limit_order_id": limit_trade.order.orderId,
+            "stop_status":    stop_trade.orderStatus.status,
+            "limit_status":   limit_trade.orderStatus.status,
+        }
+
+    result = await _ib(_execute(), timeout=60)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Symbol {req.symbol} not found")
+
+    if req.validate_only:
+        wi = result["what_if"]
+        return {
+            "validate_only": True,
+            "symbol": req.symbol,
+            "oca_group": oca_group,
+            "stop_price": req.stop_price,
+            "limit_price": req.limit_price,
+            "init_margin": wi.initMarginChange,
+            "commission":  wi.commission,
+        }
+
+    return {
+        "validate_only":  False,
+        "symbol":         req.symbol,
+        "oca_group":      oca_group,
+        "stop_order_id":  result["stop_order_id"],
+        "limit_order_id": result["limit_order_id"],
+        "stop_status":    result["stop_status"],
+        "limit_status":   result["limit_status"],
+        "stop_price":     req.stop_price,
+        "limit_price":    req.limit_price,
+    }
+
+
 @app.delete("/order/{order_id}")
 async def cancel_order(order_id: int):
     await ensure_connected()
