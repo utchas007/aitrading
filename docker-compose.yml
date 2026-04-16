@@ -1,0 +1,109 @@
+version: "3.9"
+
+# =============================================================================
+# Trading Bot — Docker Compose Stack
+# =============================================================================
+# Services:
+#   postgres       — PostgreSQL database
+#   ib-service     — Python IB gateway REST API  (connect TWS to host)
+#   nextjs         — Next.js trading dashboard
+#   trading-bot    — Standalone trading bot
+#   websocket      — WebSocket broadcast server
+#   worldmonitor   — (optional) World Monitor geopolitical context
+# =============================================================================
+
+services:
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     tradingbot
+      POSTGRES_PASSWORD: tradingbot123
+      POSTGRES_DB:       tradingdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradingbot -d tradingdb"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  # ── IB Service (Python FastAPI) ───────────────────────────────────────────────
+  # NOTE: IB service must reach TWS/Gateway running on the HOST machine.
+  # Set IB_HOST to your host machine's LAN IP (not localhost).
+  ib-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.ib
+    container_name: trading-ib-service
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      IB_HOST:         ${IB_HOST:-host.docker.internal}
+      IB_PORT:         ${IB_PORT:-7497}
+      IB_CLIENT:       ${IB_CLIENT:-10}
+      IB_SERVICE_PORT: 8765
+      IB_LOG_LEVEL:    ${IB_LOG_LEVEL:-INFO}
+      IB_ACCESS_LOG:   "0"
+      IB_CORS_ORIGINS: "http://nextjs:3001,http://localhost:3001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ── Next.js Dashboard ────────────────────────────────────────────────────────
+  nextjs:
+    build:
+      context:    deepseek-ui
+      dockerfile: Dockerfile
+    container_name: trading-nextjs
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:    postgresql://tradingbot:tradingbot123@postgres:5432/tradingdb
+      IB_SERVICE_URL:  http://ib-service:8765
+      OLLAMA_API_URL:  ${OLLAMA_API_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL:    ${OLLAMA_MODEL:-deepseek-r1:14b}
+      WORLDMONITOR_URL: ${WORLDMONITOR_URL:-http://worldmonitor:3000}
+      NEXTJS_URL:      http://nextjs:3001
+      LOG_LEVEL:       ${LOG_LEVEL:-info}
+      NODE_ENV:        production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout:  10s
+      retries:  3
+
+  # ── WebSocket Server ──────────────────────────────────────────────────────────
+  websocket:
+    build:
+      context:    deepseek-ui
+      dockerfile: Dockerfile.ws
+    container_name: trading-websocket
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    depends_on:
+      nextjs:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:    postgresql://tradingbot:tradingbot123@postgres:5432/tradingdb
+      IB_SERVICE_URL:  http://ib-service:8765
+      NEXTJS_URL:      http://nextjs:3001
+      WS_PORT:         3002
+      WS_CORS_ORIGINS: "http://localhost:3001,http://nextjs:3001"
+      LOG_LEVEL:       ${LOG_LEVEL:-info}
+      NODE_ENV:        production
+
+volumes:
+  postgres_data:
+    driver: local

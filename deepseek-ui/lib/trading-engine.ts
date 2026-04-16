@@ -7,6 +7,9 @@ import { createIBClient } from './ib-client';
 import { analyzeTechnicalIndicators, getHistoricalPrices, TechnicalSignals } from './technical-indicators';
 import { createRiskManager, RiskManager } from './risk-management';
 import { logActivity } from './activity-logger';
+import { createLogger } from './logger';
+
+const log = createLogger('trading-engine');
 import {
   getMarketSentiment, calculateEnhancedIndicators, calculatePositionSize,
   SentimentSummary,
@@ -16,6 +19,16 @@ import {
 } from './worldmonitor-data';
 import { getMarketSession } from './market-hours';
 import { saveNotification } from './notify';
+import { checkBalanceDrop, alertIBDisconnected } from './alerting';
+import {
+  DEFAULT_MIN_CONFIDENCE, DEFAULT_MAX_POSITIONS, DEFAULT_RISK_PER_TRADE,
+  DEFAULT_STOP_LOSS_PERCENT, DEFAULT_TAKE_PROFIT_PERCENT, DEFAULT_CHECK_INTERVAL_MS,
+  DEFAULT_MAX_DAILY_TRADES, DEFAULT_TRADE_COOLDOWN_HOURS,
+  ENTRY_LIMIT_SLIPPAGE, TECHNICAL_WEIGHT, AI_WEIGHT, AI_ONLY_MIN_CONFIDENCE,
+  AGREEMENT_CONFIDENCE_BOOST, VOLUME_CONFIRMATION_RATIO, BB_BELOW_RSI_MAX,
+  BB_ABOVE_RSI_MIN, ELEVATED_VIX_MACD_THRESHOLD, BEARISH_SENTIMENT_CONFIDENCE_PENALTY,
+  MAX_IB_FAILURE_COUNT,
+} from './constants';
 
 // Async DB write — persist OHLCV candles, fire and forget, never blocks the bot
 async function savePriceCandles(pair: string, interval: number, priceData: import('./technical-indicators').PriceData[]): Promise<void> {
@@ -31,8 +44,13 @@ async function savePriceCandles(pair: string, interval: number, priceData: impor
         })
       )
     );
-  } catch (e) {
-    console.error(`[DB] Failed to save price candles for ${pair}:`, e);
+  } catch (e: any) {
+    // Classify error so it's actionable in logs — connection issues are transient,
+    // constraint/schema errors need investigation.
+    const isConnection = e?.code === 'P1001' || e?.message?.includes('connect');
+    const isConstraint = e?.code?.startsWith('P2');
+    const kind = isConnection ? 'DB_CONNECTION' : isConstraint ? 'DB_CONSTRAINT' : 'DB_ERROR';
+    log.error(`${kind} in savePriceCandles`, { pair, interval, bars: priceData.length, error: e?.message ?? String(e) });
   }
 }
 
@@ -62,8 +80,11 @@ async function saveSignalToDb(signal: TradeSignal, marketSentiment?: SentimentSu
         executed: false,
       },
     });
-  } catch (e) {
-    console.error('Failed to save signal to DB:', e);
+  } catch (e: any) {
+    const isConnection = e?.code === 'P1001' || e?.message?.includes('connect');
+    const isConstraint = e?.code?.startsWith('P2');
+    const kind = isConnection ? 'DB_CONNECTION' : isConstraint ? 'DB_CONSTRAINT' : 'DB_ERROR';
+    log.error(`${kind} in saveSignalToDb`, { pair: signal.pair, action: signal.action, confidence: signal.confidence, error: e?.message ?? String(e) });
   }
 }
 
@@ -126,27 +147,29 @@ export class TradingEngine {
   private intervalId?: NodeJS.Timeout;
   private positionIntervalId?: NodeJS.Timeout; // Fast loop: SL/TP monitoring every 30s
   private ibFailureCount: number = 0;          // Consecutive IB health check failures
-  private readonly MAX_IB_FAILURES = 3;        // Stop engine after this many consecutive failures
+  private readonly MAX_IB_FAILURES = MAX_IB_FAILURE_COUNT;
   private activePositions: Map<string, ActivePosition> = new Map();
   private lastTradeTime: Map<string, number> = new Map(); // Track last trade time per pair
   private dailyTradeCount: number = 0;
   private lastResetDate: string = new Date().toDateString();
   private preOpenPrepDone: string = ''; // Date string of last pre-open prep (once per day)
+  private lastHeartbeatAt: number = 0;   // Timestamp of last successful cycle
+  private heartbeatIntervalId?: NodeJS.Timeout; // Heartbeat monitor timer
 
   constructor(config: Partial<TradingEngineConfig> = {}) {
     this.config = {
       pairs: config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA'],
-      checkInterval: config.checkInterval || 2 * 60 * 1000, // 2 minutes
-      minConfidence: config.minConfidence || 75,
-      maxPositions: config.maxPositions || 6,
-      riskPerTrade: config.riskPerTrade || 0.10, // 10% of available cash per trade
-      stopLossPercent: config.stopLossPercent || 0.05, // 5% stop loss
-      takeProfitPercent: config.takeProfitPercent || 0.10, // 10% take profit
-      autoExecute: config.autoExecute || false,
+      checkInterval:     config.checkInterval     || DEFAULT_CHECK_INTERVAL_MS,
+      minConfidence:     config.minConfidence     || DEFAULT_MIN_CONFIDENCE,
+      maxPositions:      config.maxPositions      || DEFAULT_MAX_POSITIONS,
+      riskPerTrade:      config.riskPerTrade      || DEFAULT_RISK_PER_TRADE,
+      stopLossPercent:   config.stopLossPercent   || DEFAULT_STOP_LOSS_PERCENT,
+      takeProfitPercent: config.takeProfitPercent || DEFAULT_TAKE_PROFIT_PERCENT,
+      autoExecute:       config.autoExecute       || false,
       tradingFeePercent: config.tradingFeePercent || 0.0005, // IB ~$0.005/share ≈ 0.05% round-trip
-      minProfitMargin: config.minProfitMargin || 0.02, // 2% minimum profit above fees
-      tradeCooldownHours: config.tradeCooldownHours || 1,
-      maxDailyTrades: config.maxDailyTrades || 30,
+      minProfitMargin:   config.minProfitMargin   || 0.02,   // 2% minimum profit above fees
+      tradeCooldownHours: config.tradeCooldownHours || DEFAULT_TRADE_COOLDOWN_HOURS,
+      maxDailyTrades:    config.maxDailyTrades    || DEFAULT_MAX_DAILY_TRADES,
     };
 
     this.riskManager = createRiskManager({
@@ -163,21 +186,35 @@ export class TradingEngine {
    */
   async start(): Promise<void> {
     if (this.isRunning) {
-      console.log('Trading engine is already running');
+      log.info('Trading engine is already running');
       return;
     }
 
-    console.log('🚀 Starting trading engine...');
-    console.log(`Monitoring pairs: ${this.config.pairs.join(', ')}`);
-    console.log(`Check interval: ${this.config.checkInterval / 1000}s`);
-    console.log(`Min confidence: ${this.config.minConfidence}%`);
-    console.log(`Auto-execute: ${this.config.autoExecute}`);
+    log.info('Starting trading engine', {
+      pairs: this.config.pairs.join(', '),
+      checkIntervalSec: this.config.checkInterval / 1000,
+      minConfidence: this.config.minConfidence,
+      autoExecute: this.config.autoExecute,
+    });
 
     this.isRunning = true;
+    this.lastHeartbeatAt = Date.now();
 
     // Recover any open positions from DB before starting the loops
     // (handles restarts where activePositions Map was lost)
     await this.recoverPositions();
+
+    // Heartbeat monitor: warn if the engine hasn't completed a cycle in 2× the check interval
+    this.heartbeatIntervalId = setInterval(() => {
+      const silentMs = Date.now() - this.lastHeartbeatAt;
+      const thresholdMs = this.config.checkInterval * 2;
+      if (this.isRunning && silentMs > thresholdMs) {
+        log.warn('Engine heartbeat missed — no cycle completed in expected window', {
+          silentMs: Math.round(silentMs / 1000) + 's',
+          thresholdSec: Math.round(thresholdMs / 1000),
+        });
+      }
+    }, this.config.checkInterval);
 
     // Fast loop: check SL/TP / detect IB-native closes every 30s
     this.positionIntervalId = setInterval(() => {
@@ -196,11 +233,11 @@ export class TradingEngine {
    */
   stop(): void {
     if (!this.isRunning) {
-      console.log('Trading engine is not running');
+      log.info('Trading engine is not running');
       return;
     }
 
-    console.log('🛑 Stopping trading engine...');
+    log.info('Stopping trading engine');
     this.isRunning = false;
 
     if (this.intervalId) {
@@ -210,6 +247,10 @@ export class TradingEngine {
     if (this.positionIntervalId) {
       clearInterval(this.positionIntervalId);
       this.positionIntervalId = undefined;
+    }
+    if (this.heartbeatIntervalId) {
+      clearInterval(this.heartbeatIntervalId);
+      this.heartbeatIntervalId = undefined;
     }
   }
 
@@ -228,7 +269,7 @@ export class TradingEngine {
         await this.gatherOffHoursData();
         this.preOpenPrepDone = todayStr;
       } else {
-        console.log(`[Engine] Market closed (${session.session}), next open in ${wait}. Skipping.`);
+        log.debug('Market closed, skipping cycle', { session: session.session, nextOpenIn: wait });
       }
       return;
     }
@@ -244,12 +285,14 @@ export class TradingEngine {
       if (this.ibFailureCount >= this.MAX_IB_FAILURES) {
         logActivity.error('🔴 IB unreachable — stopping engine to prevent silent failures. Restart once ib_service.py is running.');
         saveNotification('ib_disconnected', 'IB Connection Lost', 'Bot stopped after 3 consecutive IB health check failures. Restart ib_service.py and TWS.');
+        void alertIBDisconnected(this.ibFailureCount);
         this.stop();
       }
       return;
     }
 
-    console.log(`\n📊 Checking markets at ${new Date().toLocaleTimeString()}...`);
+    this.lastHeartbeatAt = Date.now(); // Heartbeat: cycle started
+    log.info('Checking markets', { pairs: this.config.pairs.length });
     logActivity.analyzing(`Checking markets for ${this.config.pairs.length} pairs...`);
 
     try {
@@ -287,7 +330,10 @@ export class TradingEngine {
         const cashKey = Object.keys(balance).find(k => k.startsWith('AvailableFunds_'));
         if (cashKey) availableCash = parseFloat(balance[cashKey]);
         logActivity.info(`💵 Available cash: $${availableCash.toLocaleString()}`);
-      } catch {
+        // Balance drop alerting
+        const netLiqKey = Object.keys(balance).find(k => k.startsWith('NetLiquidation_'));
+        if (netLiqKey) void checkBalanceDrop(parseFloat(balance[netLiqKey]));
+  } catch {
         logActivity.warning('Could not fetch IB balance — using $10,000 fallback for position sizing');
       }
 
@@ -307,26 +353,29 @@ export class TradingEngine {
 
             if (!tradeAllowed.allowed) {
               logActivity.warning(`❌ Trade blocked for ${pair}: ${tradeAllowed.reason}`);
-              console.log(`\n❌ Trade blocked for ${pair}: ${tradeAllowed.reason}`);
               continue;
             }
 
-            console.log(`\n🎯 Signal generated for ${pair}:`);
-            console.log(`   Action: ${signal.action.toUpperCase()}`);
-            console.log(`   Confidence: ${signal.confidence}%`);
-            console.log(`   Entry: $${signal.entryPrice.toFixed(2)}`);
-            console.log(`   Stop Loss: $${signal.stopLoss.toFixed(2)}`);
-            console.log(`   Take Profit: $${signal.takeProfit.toFixed(2)}`);
-            console.log(`   Position Size: ${signal.positionSize.toFixed(8)}`);
-            console.log(`   Expected Profit: ${tradeAllowed.expectedProfitPercent?.toFixed(2)}% (after fees)`);
-            console.log(`   Reasoning: ${signal.reasoning}`);
+            log.info('Signal generated', {
+              pair,
+              action: signal.action.toUpperCase(),
+              confidence: signal.confidence,
+              entry: signal.entryPrice.toFixed(2),
+              stopLoss: signal.stopLoss.toFixed(2),
+              takeProfit: signal.takeProfit.toFixed(2),
+              positionSize: signal.positionSize,
+              expectedProfitPct: tradeAllowed.expectedProfitPercent?.toFixed(2),
+              reasoning: signal.reasoning,
+            });
 
             logActivity.info(`🎯 Signal: ${signal.action.toUpperCase()} ${pair} | Confidence: ${signal.confidence}% | Entry: $${signal.entryPrice.toFixed(2)}`);
             logActivity.info(`📊 ${signal.reasoning}`);
             logActivity.info(`💰 Expected profit: ${tradeAllowed.expectedProfitPercent?.toFixed(2)}% after ${(this.config.tradingFeePercent * 200).toFixed(2)}% fees`);
 
             // Save signal to database (sentiment returned alongside signal)
-            saveSignalToDb(signal, signal.marketSentiment).catch(() => {});
+            void saveSignalToDb(signal, signal.marketSentiment).catch(e =>
+              log.error('saveSignalToDb escaped internal catch', { error: String(e) })
+            );
 
             if (this.config.autoExecute) {
               await this.executeSignal(signal);
@@ -337,14 +386,14 @@ export class TradingEngine {
             logActivity.info(`${pair}: HOLD | Confidence: ${signal.confidence}% | ${signal.reasoning}`);
           }
         } catch (error) {
-          console.error(`Error checking ${pair}:`, error);
+          log.error(`Error checking pair`, { pair, error: String(error) });
           logActivity.error(`Failed to analyze ${pair}: ${error}`);
         }
       }
-      
+
       logActivity.completed(`Market check complete. Active positions: ${this.activePositions.size}`);
     } catch (error) {
-      console.error('Error in checkMarkets:', error);
+      log.error('checkMarkets failed', { error: String(error) });
       logActivity.error(`Market check failed: ${error}`);
     }
   }
@@ -354,7 +403,7 @@ export class TradingEngine {
    * ready to act the moment the market opens. No live tickers, no execution.
    */
   private async gatherOffHoursData(): Promise<void> {
-    console.log(`\n📚 Pre-open prep at ${new Date().toLocaleTimeString()}...`);
+    log.info('Running pre-open prep');
 
     const news = await this.fetchWorldMonitorNews();
 
@@ -402,13 +451,13 @@ export class TradingEngine {
     try {
       const response = await fetch(`${worldMonitorUrl}/api/worldmonitor/news`);
       if (!response.ok) {
-        console.warn('Failed to fetch World Monitor news, continuing with technical analysis only');
+        log.warn('Failed to fetch World Monitor news, continuing with technical analysis only');
         return [];
       }
       const data = await response.json();
       return data.news || [];
     } catch (error) {
-      console.warn('World Monitor not available, continuing with technical analysis only');
+      log.warn('World Monitor not available, continuing with technical analysis only');
       return [];
     }
   }
@@ -421,7 +470,8 @@ export class TradingEngine {
       // Detect if this is a stock symbol (uppercase letters only, 1-5 chars, no numbers)
       const isStock = /^[A-Z]{1,5}$/.test(pair);
 
-      const response = await fetch('http://localhost:3001/api/trading/analyze', {
+      const nextjsUrl = process.env.NEXTJS_URL || 'http://localhost:3001';
+      const response = await fetch(`${nextjsUrl}/api/trading/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -441,7 +491,7 @@ export class TradingEngine {
       const data = await response.json();
       return data.analysis;
     } catch (error) {
-      console.warn('AI sentiment analysis not available');
+      log.warn('AI sentiment analysis not available');
       return null;
     }
   }
@@ -454,7 +504,9 @@ export class TradingEngine {
     const priceData = await getHistoricalPrices(pair, 1440);
 
     // Persist candles to DB (fire and forget — never blocks signal generation)
-    savePriceCandles(pair, 1440, priceData).catch(() => {});
+    void savePriceCandles(pair, 1440, priceData).catch(e =>
+      log.error('savePriceCandles escaped internal catch', { error: String(e) })
+    );
 
     if (priceData.length < 50) {
       throw new Error(`Insufficient price data for ${pair}`);
@@ -551,16 +603,16 @@ export class TradingEngine {
       confidence = Math.round((technicalSignals.confidence * technicalWeight) + (aiScore * aiWeight));
 
       if (technicalSignals.overallSignal === 'strong_buy' || technicalSignals.overallSignal === 'buy') {
-        if (aiAnalysis.signal === 'BUY') { action = 'buy'; confidence = Math.min(confidence + 10, 100); }
+        if (aiAnalysis.signal === 'BUY') { action = 'buy'; confidence = Math.min(confidence + AGREEMENT_CONFIDENCE_BOOST, 100); }
         else if (aiAnalysis.signal === 'SELL') { action = 'hold'; confidence = 50; }
         else { action = 'buy'; }
       } else if (technicalSignals.overallSignal === 'strong_sell' || technicalSignals.overallSignal === 'sell') {
-        if (aiAnalysis.signal === 'SELL') { action = 'sell'; confidence = Math.min(confidence + 10, 100); }
+        if (aiAnalysis.signal === 'SELL') { action = 'sell'; confidence = Math.min(confidence + AGREEMENT_CONFIDENCE_BOOST, 100); }
         else if (aiAnalysis.signal === 'BUY') { action = 'hold'; confidence = 50; }
         else { action = 'sell'; }
       } else {
-        if (aiAnalysis.signal === 'BUY' && aiAnalysis.confidence >= 70) action = 'buy';
-        else if (aiAnalysis.signal === 'SELL' && aiAnalysis.confidence >= 70) action = 'sell';
+        if (aiAnalysis.signal === 'BUY' && aiAnalysis.confidence >= AI_ONLY_MIN_CONFIDENCE) action = 'buy';
+        else if (aiAnalysis.signal === 'SELL' && aiAnalysis.confidence >= AI_ONLY_MIN_CONFIDENCE) action = 'sell';
       }
     } else {
       if (technicalSignals.overallSignal === 'strong_buy' || technicalSignals.overallSignal === 'buy') action = 'buy';
@@ -576,7 +628,7 @@ export class TradingEngine {
 
     // Apply sentiment penalty — reduce confidence when market is bearish
     if (marketSentiment && marketSentiment.overallSentiment === 'Bearish') {
-      if (action === 'buy') confidence = Math.max(0, confidence - 15);
+      if (action === 'buy') confidence = Math.max(0, confidence - BEARISH_SENTIMENT_CONFIDENCE_PENALTY);
     }
 
     // ── Micro filter 1: Volume confirmation ──────────────────────────────────
@@ -585,7 +637,7 @@ export class TradingEngine {
       const volumeRatio = technicalSignals.volume.average > 0
         ? technicalSignals.volume.current / technicalSignals.volume.average
         : 1;
-      if (volumeRatio < 1.3) {
+      if (volumeRatio < VOLUME_CONFIRMATION_RATIO) {
         logActivity.warning(`${pair}: Weak volume (${volumeRatio.toFixed(1)}× avg) — insufficient conviction. Switching to HOLD.`);
         action = 'hold';
       }
@@ -595,13 +647,13 @@ export class TradingEngine {
     // Below lower band is only a valid long if RSI confirms oversold (<40).
     // Above upper band is only a valid short if RSI confirms overbought (>60).
     if (action === 'buy' && technicalSignals.bollingerBands.position === 'below') {
-      if (technicalSignals.rsi >= 40) {
+      if (technicalSignals.rsi >= BB_BELOW_RSI_MAX) {
         logActivity.warning(`${pair}: Below BB but RSI not oversold (${technicalSignals.rsi.toFixed(0)}) — false signal. HOLD.`);
         action = 'hold';
       }
     }
     if (action === 'sell' && technicalSignals.bollingerBands.position === 'above') {
-      if (technicalSignals.rsi <= 60) {
+      if (technicalSignals.rsi <= BB_ABOVE_RSI_MIN) {
         logActivity.warning(`${pair}: Above BB but RSI not overbought (${technicalSignals.rsi.toFixed(0)}) — false signal. HOLD.`);
         action = 'hold';
       }
@@ -610,7 +662,7 @@ export class TradingEngine {
     // ── Micro filter 3: VIX + MACD stability ─────────────────────────────────
     // At elevated VIX (>22), require MACD histogram > 0 to confirm trend has
     // actual momentum behind it — not just a noise spike.
-    if (action !== 'hold' && (marketSentiment?.vix.value ?? 0) > 22) {
+    if (action !== 'hold' && (marketSentiment?.vix.value ?? 0) > ELEVATED_VIX_MACD_THRESHOLD) {
       if (technicalSignals.macd.histogram <= 0) {
         logActivity.warning(`${pair}: Elevated VIX + MACD histogram ≤ 0 (${technicalSignals.macd.histogram.toFixed(2)}) — no momentum. HOLD.`);
         action = 'hold';
@@ -733,7 +785,7 @@ export class TradingEngine {
    */
   private async executeSignal(signal: TradeSignal): Promise<void> {
     try {
-      console.log(`\n⚡ Executing ${signal.action.toUpperCase()} order for ${signal.pair}...`);
+      log.info('Executing order', { action: signal.action.toUpperCase(), pair: signal.pair });
       logActivity.executing(`Executing ${signal.action.toUpperCase()} order for ${signal.pair}...`);
 
       const ib = createIBClient();
@@ -775,7 +827,7 @@ export class TradingEngine {
         // This survives any process restart — exits are on IB's servers.
         // Use a limit order entry (0.5% above current price for BUY, 0.5% below for SELL)
         // This prevents overpaying if the stock gaps up/down overnight
-        const limitSlippage = 0.005;
+        const limitSlippage = ENTRY_LIMIT_SLIPPAGE;
         const entryLimit = signal.action === 'buy'
           ? parseFloat((signal.entryPrice * (1 + limitSlippage)).toFixed(2))
           : parseFloat((signal.entryPrice * (1 - limitSlippage)).toFixed(2));
@@ -862,7 +914,7 @@ export class TradingEngine {
           });
           dbTradeId = dbTrade.id;
         } catch (e) {
-          console.error('[DB] Failed to save trade:', e);
+          log.error('DB failed to save trade', { error: String(e) });
         }
       }
 
@@ -896,7 +948,7 @@ export class TradingEngine {
           : undefined,
       });
     } catch (error: any) {
-      console.error(`❌ Failed to execute order:`, error.message);
+      log.error('Failed to execute order', { pair: signal.pair, action: signal.action, error: error.message });
       logActivity.error(`Failed to execute ${signal.action} order for ${signal.pair}: ${error.message}`);
       saveNotification(
         'trade_failed',
@@ -973,7 +1025,7 @@ export class TradingEngine {
           if (!ibPos) {
             // IB no longer holds shares → bracket SL or TP fired
             const closeReason = position.pnl >= 0 ? 'take_profit' : 'stop_loss';
-            console.log(`\n🔔 IB bracket closed ${position.pair} (${closeReason}) | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%)`);
+            log.info('IB bracket closed position', { pair: position.pair, closeReason, pnl: position.pnl.toFixed(2), pnlPct: position.pnlPercent.toFixed(2) });
             logActivity.completed(`✅ Position closed by IB — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${closeReason}`);
             saveNotification(
               'trade_closed',
@@ -995,7 +1047,7 @@ export class TradingEngine {
                     closeReason,
                   },
                 })
-              ).catch(e => console.error('[DB] Failed to update trade on close:', e));
+              ).catch(e => log.error('DB failed to update trade on close', { error: String(e) }));
             }
 
             this.activePositions.delete(txid);
@@ -1013,15 +1065,14 @@ export class TradingEngine {
           });
 
           if (shouldClose.shouldClose) {
-            console.log(`\n🔔 ${shouldClose.reason?.toUpperCase()} triggered (paper) for ${position.pair}`);
-            console.log(`   Entry: $${position.entryPrice.toFixed(2)} | Current: $${position.currentPrice.toFixed(2)} | P&L: $${position.pnl.toFixed(2)}`);
+            log.info('Paper position closed', { pair: position.pair, reason: shouldClose.reason, entry: position.entryPrice.toFixed(2), current: position.currentPrice.toFixed(2), pnl: position.pnl.toFixed(2) });
             logActivity.completed(`✅ Paper position closed — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${shouldClose.reason}`);
             this.activePositions.delete(txid);
           }
         }
       }
     } catch (error) {
-      console.error('Error updating positions:', error);
+      log.error('Error updating positions', { error: String(error) });
     }
   }
 
@@ -1035,7 +1086,15 @@ export class TradingEngine {
   async recoverPositions(): Promise<void> {
     try {
       const { prisma } = await import('./db');
-      const openTrades = await prisma.trade.findMany({ where: { status: 'open' } });
+      const openTrades = await prisma.trade.findMany({
+        where: { status: 'open' },
+        select: {
+          id: true, pair: true, type: true, entryPrice: true, volume: true,
+          stopLoss: true, takeProfit: true, txid: true, createdAt: true,
+          slOrderId: true, tpOrderId: true,
+          expectedProfitUSD: true, expectedLossUSD: true, riskRewardRatio: true,
+        },
+      });
 
       if (openTrades.length === 0) return;
 
@@ -1170,9 +1229,13 @@ export class TradingEngine {
    */
   getStatus() {
     return {
-      isRunning: this.isRunning,
-      config: this.config,
-      activePositions: this.getActivePositions().length,
+      isRunning:          this.isRunning,
+      config:             this.config,
+      activePositions:    this.getActivePositions().length,
+      lastHeartbeatAt:    this.lastHeartbeatAt || null,
+      secondsSinceHeartbeat: this.lastHeartbeatAt
+        ? Math.round((Date.now() - this.lastHeartbeatAt) / 1000)
+        : null,
     };
   }
 
@@ -1188,7 +1251,7 @@ export class TradingEngine {
       });
     } catch (error) {
       // Silently fail - portfolio tracking is optional
-      console.debug('Portfolio snapshot skipped:', error);
+      log.debug('Portfolio snapshot skipped', { error: String(error) });
     }
   }
 }

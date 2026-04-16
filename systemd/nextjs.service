@@ -1,0 +1,39 @@
+[Unit]
+Description=Trading Bot — Next.js App (Port 3001)
+Documentation=file:///home/aiserver/Trading Project/STARTUP_GUIDE.md
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=aiserver
+Group=aiserver
+WorkingDirectory=/home/aiserver/Trading Project/deepseek-ui
+
+# Environment — source from file so secrets aren't in the unit itself
+EnvironmentFile=-/home/aiserver/Trading Project/deepseek-ui/.env.local
+Environment="NODE_ENV=production"
+Environment="PATH=/home/aiserver/.nvm/versions/node/v24.14.1/bin:/usr/bin:/usr/local/bin"
+
+# Build on first start (subsequent restarts skip if already built)
+ExecStartPre=/home/aiserver/.nvm/versions/node/v24.14.1/bin/npx prisma migrate deploy
+ExecStart=/home/aiserver/.nvm/versions/node/v24.14.1/bin/node node_modules/.bin/next start -p 3001 -H 0.0.0.0
+
+# Graceful shutdown: send SIGTERM and wait up to 30s for clean exit
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+StandardOutput=append:/home/aiserver/Trading Project/nextjs.log
+StandardError=append:/home/aiserver/Trading Project/nextjs.log
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

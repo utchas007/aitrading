@@ -3,6 +3,11 @@
  * Extracts market-relevant data from World Monitor for trading analysis
  */
 
+import { TIMEOUTS } from '@/lib/timeouts';
+import { createLogger } from '@/lib/logger';
+
+const log = createLogger('worldmonitor');
+
 const WORLDMONITOR_URL = process.env.WORLDMONITOR_URL || 'http://localhost:3000';
 
 // ─── Interfaces ─────────────────────────────────────────────────────────────
@@ -81,7 +86,7 @@ export async function fetchCommodityPrices(): Promise<CommodityQuote[]> {
           `https://query1.finance.yahoo.com/v8/finance/chart/${symbols[i]}?interval=1d&range=2d`,
           { 
             headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(5000),
+            signal: AbortSignal.timeout(TIMEOUTS.TICKER_MS),
           }
         );
         
@@ -108,7 +113,7 @@ export async function fetchCommodityPrices(): Promise<CommodityQuote[]> {
     
     return quotes;
   } catch (error) {
-    console.error('Failed to fetch commodity prices:', error);
+    log.error('Failed to fetch commodity prices', { error: String(error) });
     return [];
   }
 }
@@ -136,7 +141,7 @@ export async function fetchGlobalIndices(): Promise<GlobalIndex[]> {
           `https://query1.finance.yahoo.com/v8/finance/chart/${idx.symbol}?interval=1d&range=2d`,
           { 
             headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(5000),
+            signal: AbortSignal.timeout(TIMEOUTS.TICKER_MS),
           }
         );
         
@@ -161,7 +166,7 @@ export async function fetchGlobalIndices(): Promise<GlobalIndex[]> {
     
     return results;
   } catch (error) {
-    console.error('Failed to fetch global indices:', error);
+    log.error('Failed to fetch global indices', { error: String(error) });
     return [];
   }
 }
@@ -172,7 +177,7 @@ export async function fetchGlobalIndices(): Promise<GlobalIndex[]> {
 export async function fetchBreakingNews(limit = 10): Promise<string[]> {
   try {
     const res = await fetch(`http://localhost:3001/api/worldmonitor/news?category=markets&limit=${limit}`, {
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     
     if (res.ok) {
@@ -260,7 +265,7 @@ export async function calculateGeopoliticalRisk(): Promise<GeopoliticalRisk> {
       affectedSectors: [...new Set(affectedSectors)],
     };
   } catch (error) {
-    console.error('Failed to calculate geopolitical risk:', error);
+    log.error('Failed to calculate geopolitical risk', { error: String(error) });
     return {
       level: 'low',
       score: 20,

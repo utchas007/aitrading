@@ -7,9 +7,14 @@
  * Or:    npm run bot
  */
 
+import '../lib/startup-check'; // Fail fast if required env vars are missing
 import { createTradingEngine } from '../lib/trading-engine';
 import { getActivityLogger } from '../lib/activity-logger';
+import { createLogger } from '../lib/logger';
+import { alertEnginecrash } from '../lib/alerting';
 import http from 'http';
+
+const log = createLogger('trading-bot');
 
 const CONFIG = {
   pairs: ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
@@ -68,7 +73,7 @@ const server = http.createServer((req, res) => {
         
         if (action === 'start') {
           if (!engine.getStatus().isRunning) {
-            engine.start().catch(console.error);
+            engine.start().catch(err => log.error('Engine start error', { error: String(err) }));
           }
           res.writeHead(200);
           res.end(JSON.stringify({ success: true, message: 'Bot started' }));
@@ -79,7 +84,7 @@ const server = http.createServer((req, res) => {
         } else if (action === 'restart') {
           engine.stop();
           engine = createTradingEngine(CONFIG);
-          engine.start().catch(console.error);
+          engine.start().catch(err => log.error('Engine start error', { error: String(err) }));
           res.writeHead(200);
           res.end(JSON.stringify({ success: true, message: 'Bot restarted' }));
         } else {
@@ -113,19 +118,47 @@ server.listen(PORT, () => {
 `);
   
   // Auto-start the engine
-  engine.start().catch(console.error);
+  engine.start().catch(err => log.error('Engine start error', { error: String(err) }));
 });
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n🛑 Stopping trading bot...');
+// Graceful shutdown — close DB connections, drain in-flight requests, exit cleanly
+async function gracefulShutdown(signal: string): Promise<void> {
+  log.info(`${signal} received — initiating graceful shutdown`);
+
+  // 1. Stop new market cycles from starting
   engine.stop();
-  server.close();
+
+  // 2. Stop the HTTP control server from accepting new connections
+  server.close(() => {
+    log.info('HTTP server closed');
+  });
+
+  // 3. Close the Prisma DB connection pool
+  try {
+    const { prisma } = await import('../lib/db');
+    await prisma.$disconnect();
+    log.info('Database connection closed');
+  } catch (e) {
+    log.error('Error closing DB connection', { error: String(e) });
+  }
+
+  log.info('Shutdown complete');
   process.exit(0);
+}
+
+process.on('SIGINT',  () => void gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
+
+// Catch uncaught exceptions so the bot doesn't silently die
+process.on('uncaughtException', (err) => {
+  log.error('Uncaught exception — initiating emergency shutdown', { error: err.message, stack: err.stack });
+  // Fire-and-forget: alert first, then exit
+  void alertEnginecrash(err).finally(() => {
+    engine.stop();
+    process.exit(1);
+  });
 });
 
-process.on('SIGTERM', () => {
-  engine.stop();
-  server.close();
-  process.exit(0);
+process.on('unhandledRejection', (reason) => {
+  log.error('Unhandled promise rejection', { reason: String(reason) });
 });

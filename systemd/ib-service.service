@@ -1,0 +1,36 @@
+[Unit]
+Description=Trading Bot — IB Service (FastAPI, Port 8765)
+Documentation=file:///home/aiserver/Trading Project/STARTUP_GUIDE.md
+After=network.target
+
+[Service]
+Type=simple
+User=aiserver
+Group=aiserver
+WorkingDirectory=/home/aiserver/Trading Project
+
+EnvironmentFile=-/home/aiserver/Trading Project/.env.ib
+Environment="IB_HOST=127.0.0.1"
+Environment="IB_PORT=7497"
+Environment="IB_CLIENT=10"
+Environment="IB_SERVICE_PORT=8765"
+Environment="IB_LOG_LEVEL=INFO"
+Environment="IB_ACCESS_LOG=0"
+Environment="PATH=/home/aiserver/.local/bin:/usr/local/bin:/usr/bin"
+
+ExecStart=/usr/bin/python3 /home/aiserver/Trading Project/ib_service.py
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+StandardOutput=append:/home/aiserver/Trading Project/ib_service.log
+StandardError=append:/home/aiserver/Trading Project/ib_service.log
+
+[Install]
+WantedBy=multi-user.target

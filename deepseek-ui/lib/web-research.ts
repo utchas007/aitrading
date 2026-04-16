@@ -1,11 +1,23 @@
 /**
  * Web Research Module
- * Uses browser automation to gather market intelligence
+ * Gathers market intelligence using lightweight HTTP requests + RSS parsing.
+ *
+ * NOTE: Previously used Puppeteer + headless Chrome for scraping.
+ * Replaced with native fetch + cheerio for the following reasons:
+ *   - Puppeteer adds ~300MB to the Docker image
+ *   - Browser automation is fragile and breaks on site layout changes
+ *   - All required data (news, sentiment, Fear & Greed) is available via free APIs
+ *   - Reddit JSON API, Yahoo Finance RSS, and alternative.me need no API key
+ *
+ * For more detailed AI analysis of news, use market-intelligence.ts which
+ * aggregates multiple free data sources without requiring a browser.
  */
 
-import puppeteer, { Browser, Page } from 'puppeteer';
+import { createLogger } from './logger';
+import { TIMEOUTS } from './timeouts';
+
+const log = createLogger('web-research');
 import * as cheerio from 'cheerio';
-import axios from 'axios';
 
 export interface ResearchData {
   news: NewsArticle[];
@@ -47,315 +59,188 @@ export interface ChartAnalysis {
   prediction: 'up' | 'down' | 'sideways';
 }
 
+const CHROME_UA = 'Mozilla/5.0 (compatible; TradingBot/1.0)';
+
 export class WebResearcher {
-  private browser?: Browser;
-  private isInitialized: boolean = false;
-
-  /**
-   * Initialize browser
-   */
+  /** No browser to initialize. Kept for API compatibility. */
   async initialize(): Promise<void> {
-    if (this.isInitialized) return;
-
-    try {
-      this.browser = await puppeteer.launch({
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gpu',
-        ],
-      });
-      this.isInitialized = true;
-      console.log('✅ Browser initialized for web research');
-    } catch (error) {
-      console.error('Failed to initialize browser:', error);
-      throw error;
-    }
+    // no-op: browser automation removed in favour of lightweight HTTP
   }
 
-  /**
-   * Close browser
-   */
   async close(): Promise<void> {
-    if (this.browser) {
-      await this.browser.close();
-      this.isInitialized = false;
-      console.log('🛑 Browser closed');
-    }
+    // no-op
   }
 
   /**
-   * Search Google for crypto news
+   * Fetch news from Yahoo Finance RSS feed (free, no API key, no browser).
+   * Previously used Google scraping via Puppeteer.
    */
   async searchGoogle(query: string): Promise<NewsArticle[]> {
-    if (!this.browser) await this.initialize();
-
-    const page = await this.browser!.newPage();
     const articles: NewsArticle[] = [];
-
     try {
-      await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=nws`, {
-        waitUntil: 'networkidle2',
-        timeout: 10000,
+      const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(query)}&region=US&lang=en-US`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': CHROME_UA, Accept: 'application/rss+xml,text/xml,*/*' },
+        signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
       });
+      if (!res.ok) return articles;
 
-      const content = await page.content();
-      const $ = cheerio.load(content);
-
-      $('div.SoaBEf').each((i, elem) => {
-        if (i >= 10) return; // Limit to 10 results
-
-        const title = $(elem).find('div.n0jPhd').text();
-        const source = $(elem).find('div.CEMjEf span').first().text();
-        const snippet = $(elem).find('div.GI74Re').text();
-        const url = $(elem).find('a').attr('href') || '';
-
-        if (title && source) {
-          articles.push({
-            title,
-            source,
-            url,
-            snippet,
-            timestamp: Date.now(),
-            sentiment: this.analyzeSentiment(title + ' ' + snippet),
-          });
-        }
-      });
-
-      console.log(`📰 Found ${articles.length} news articles for "${query}"`);
-    } catch (error) {
-      console.error('Google search error:', error);
-    } finally {
-      await page.close();
-    }
-
-    return articles;
-  }
-
-  /**
-   * Get Twitter sentiment (simplified - scrapes public data)
-   */
-  async getTwitterSentiment(keyword: string): Promise<number> {
-    // Note: Twitter API requires authentication
-    // This is a simplified version using public search
-    try {
-      const response = await axios.get(
-        `https://twitter.com/search?q=${encodeURIComponent(keyword)}&src=typed_query&f=live`,
-        {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          },
-          timeout: 5000,
-        }
-      );
-
-      // Simplified sentiment analysis
-      const content = response.data.toLowerCase();
-      const positiveWords = ['bullish', 'moon', 'pump', 'buy', 'long', 'up', 'gain'];
-      const negativeWords = ['bearish', 'dump', 'sell', 'short', 'down', 'loss', 'crash'];
-
-      let score = 0;
-      positiveWords.forEach(word => {
-        const matches = (content.match(new RegExp(word, 'g')) || []).length;
-        score += matches;
-      });
-      negativeWords.forEach(word => {
-        const matches = (content.match(new RegExp(word, 'g')) || []).length;
-        score -= matches;
-      });
-
-      return Math.max(-100, Math.min(100, score));
-    } catch (error) {
-      console.error('Twitter sentiment error:', error);
-      return 0;
-    }
-  }
-
-  /**
-   * Get Reddit sentiment from r/cryptocurrency
-   */
-  async getRedditSentiment(keyword: string): Promise<number> {
-    try {
-      const response = await axios.get(
-        `https://www.reddit.com/r/cryptocurrency/search.json?q=${encodeURIComponent(keyword)}&restrict_sr=1&sort=new&limit=25`,
-        {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          },
-          timeout: 5000,
-        }
-      );
-
-      const posts = response.data.data.children;
-      let score = 0;
-
-      posts.forEach((post: any) => {
-        const title = post.data.title.toLowerCase();
-        const upvotes = post.data.ups || 0;
-
-        // Weight by upvotes
-        if (title.includes('bullish') || title.includes('buy') || title.includes('moon')) {
-          score += upvotes * 0.1;
-        }
-        if (title.includes('bearish') || title.includes('sell') || title.includes('crash')) {
-          score -= upvotes * 0.1;
-        }
-      });
-
-      return Math.max(-100, Math.min(100, score));
-    } catch (error) {
-      console.error('Reddit sentiment error:', error);
-      return 0;
-    }
-  }
-
-  /**
-   * Scrape CoinDesk for latest crypto news
-   */
-  async scrapeCoinDesk(): Promise<NewsArticle[]> {
-    const articles: NewsArticle[] = [];
-
-    try {
-      const response = await axios.get('https://www.coindesk.com/', {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-        timeout: 10000,
-      });
-
-      const $ = cheerio.load(response.data);
-
-      $('article').each((i, elem) => {
-        if (i >= 10) return;
-
-        const title = $(elem).find('h2, h3, h4').first().text().trim();
-        const url = $(elem).find('a').first().attr('href') || '';
-        const snippet = $(elem).find('p').first().text().trim();
-
+      const xml = await res.text();
+      const $ = cheerio.load(xml, { xmlMode: true });
+      $('item').slice(0, 10).each((_, elem) => {
+        const title   = $(elem).find('title').text().trim();
+        const link    = $(elem).find('link').text().trim();
+        const snippet = $(elem).find('description').text().trim();
         if (title) {
           articles.push({
             title,
-            source: 'CoinDesk',
-            url: url.startsWith('http') ? url : `https://www.coindesk.com${url}`,
+            source: 'Yahoo Finance',
+            url:    link,
             snippet,
             timestamp: Date.now(),
             sentiment: this.analyzeSentiment(title + ' ' + snippet),
           });
         }
       });
-
-      console.log(`📰 Scraped ${articles.length} articles from CoinDesk`);
+      log.debug('Yahoo Finance RSS complete', { query, articles: articles.length });
     } catch (error) {
-      console.error('CoinDesk scraping error:', error);
+      log.warn('Yahoo Finance RSS unavailable', { query, error: String(error) });
     }
-
     return articles;
   }
 
   /**
-   * Get Fear & Greed Index
+   * Twitter sentiment is no longer available without API auth.
+   * Returns 0 (neutral) as a no-op.
    */
+  async getTwitterSentiment(_keyword: string): Promise<number> {
+    return 0; // Twitter API requires OAuth2 — not feasible without credentials
+  }
+
+  /**
+   * Reddit sentiment via the public JSON API (no API key needed).
+   */
+  async getRedditSentiment(keyword: string): Promise<number> {
+    try {
+      const res = await fetch(
+        `https://www.reddit.com/r/stocks/search.json?q=${encodeURIComponent(keyword)}&restrict_sr=1&sort=hot&limit=25`,
+        {
+          headers: { 'User-Agent': 'TradingBot/1.0 (research)' },
+          signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
+        },
+      );
+      if (!res.ok) return 0;
+      const data = await res.json();
+      const posts: Array<{ data: { title: string; ups: number } }> = data?.data?.children ?? [];
+
+      let score = 0;
+      for (const post of posts) {
+        const title  = post.data.title.toLowerCase();
+        const upvotes = post.data.ups || 0;
+        if (/bullish|buy|long|moon/.test(title)) score += upvotes * 0.1;
+        if (/bearish|sell|short|crash/.test(title)) score -= upvotes * 0.1;
+      }
+      return Math.max(-100, Math.min(100, score));
+    } catch (error) {
+      log.warn('Reddit sentiment unavailable', { error: String(error) });
+      return 0;
+    }
+  }
+
+  /**
+   * Fetch Reuters Business RSS feed instead of scraping CoinDesk.
+   */
+  async scrapeCoinDesk(): Promise<NewsArticle[]> {
+    const articles: NewsArticle[] = [];
+    try {
+      const res = await fetch('https://feeds.reuters.com/reuters/businessNews', {
+        headers: { 'User-Agent': CHROME_UA, Accept: 'application/rss+xml,text/xml,*/*' },
+        signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
+      });
+      if (!res.ok) return articles;
+
+      const xml = await res.text();
+      const $ = cheerio.load(xml, { xmlMode: true });
+      $('item').slice(0, 10).each((_, elem) => {
+        const title   = $(elem).find('title').text().trim();
+        const link    = $(elem).find('link').text().trim();
+        const snippet = $(elem).find('description').text().trim();
+        if (title) {
+          articles.push({
+            title,
+            source: 'Reuters',
+            url:    link,
+            snippet,
+            timestamp: Date.now(),
+            sentiment: this.analyzeSentiment(title + ' ' + snippet),
+          });
+        }
+      });
+    } catch (error) {
+      log.warn('Reuters RSS unavailable', { error: String(error) });
+    }
+    return articles;
+  }
+
+  /** Fear & Greed Index from alternative.me (free API). */
   async getFearGreedIndex(): Promise<{ value: number; classification: string }> {
     try {
-      const response = await axios.get('https://api.alternative.me/fng/', {
-        timeout: 5000,
+      const res = await fetch('https://api.alternative.me/fng/?limit=1', {
+        signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
       });
-
-      const data = response.data.data[0];
-      return {
-        value: parseInt(data.value),
-        classification: data.value_classification,
-      };
+      if (!res.ok) return { value: 50, classification: 'Neutral' };
+      const data = await res.json();
+      const item = data.data[0];
+      return { value: parseInt(item.value), classification: item.value_classification };
     } catch (error) {
-      console.error('Fear & Greed Index error:', error);
+      log.warn('Fear & Greed Index unavailable', { error: String(error) });
       return { value: 50, classification: 'Neutral' };
     }
   }
 
-  /**
-   * Comprehensive market research
-   */
+  /** Comprehensive market research — runs all data sources in parallel. */
   async conductResearch(pair: string): Promise<ResearchData> {
-    console.log(`\n🔍 Conducting web research for ${pair}...`);
+    log.info('Conducting web research', { pair });
+    const coin = pair.replace(/Z?USD$/, '').replace(/^X/, '');
 
-    const coin = pair.replace('ZUSD', '').replace('X', ''); // XXBTZUSD -> BTC
-
-    // Parallel research
-    const [googleNews, coinDeskNews, twitterSentiment, redditSentiment, fearGreed] = await Promise.all([
-      this.searchGoogle(`${coin} cryptocurrency news today`),
+    const [yahooNews, reutersNews, redditSentiment, fearGreed] = await Promise.all([
+      this.searchGoogle(coin),
       this.scrapeCoinDesk(),
-      this.getTwitterSentiment(coin),
       this.getRedditSentiment(coin),
       this.getFearGreedIndex(),
     ]);
 
-    // Combine news
-    const allNews = [...googleNews, ...coinDeskNews];
-
-    // Calculate overall sentiment
-    const newsSentiment = this.calculateNewsSentiment(allNews);
-    const overallScore = (newsSentiment + twitterSentiment + redditSentiment + (fearGreed.value - 50)) / 4;
+    const allNews        = [...yahooNews, ...reutersNews];
+    const newsSentiment  = this.calculateNewsSentiment(allNews);
+    const overallScore   = (newsSentiment + redditSentiment + (fearGreed.value - 50)) / 3;
 
     const sentiment: SentimentData = {
       overall: overallScore > 20 ? 'bullish' : overallScore < -20 ? 'bearish' : 'neutral',
-      score: overallScore,
-      sources: {
-        twitter: twitterSentiment,
-        reddit: redditSentiment,
-        news: newsSentiment,
-      },
+      score:   overallScore,
+      sources: { twitter: 0, reddit: redditSentiment, news: newsSentiment },
     };
 
-    console.log(`📊 Research complete:`);
-    console.log(`   News articles: ${allNews.length}`);
-    console.log(`   Overall sentiment: ${sentiment.overall} (${sentiment.score.toFixed(1)})`);
-    console.log(`   Fear & Greed: ${fearGreed.value} (${fearGreed.classification})`);
+    log.info('Research complete', {
+      pair, newsArticles: allNews.length,
+      sentiment: sentiment.overall, sentimentScore: sentiment.score.toFixed(1),
+      fearGreed: fearGreed.value,
+    });
 
-    return {
-      news: allNews,
-      sentiment,
-      trends: [],
-      charts: [],
-    };
+    return { news: allNews, sentiment, trends: [], charts: [] };
   }
 
-  /**
-   * Simple sentiment analysis
-   */
   private analyzeSentiment(text: string): 'positive' | 'negative' | 'neutral' {
-    const lowerText = text.toLowerCase();
-    const positiveWords = ['bullish', 'surge', 'rally', 'gain', 'up', 'rise', 'moon', 'pump', 'buy', 'long'];
-    const negativeWords = ['bearish', 'crash', 'dump', 'loss', 'down', 'fall', 'sell', 'short', 'fear'];
-
-    let score = 0;
-    positiveWords.forEach(word => {
-      if (lowerText.includes(word)) score++;
-    });
-    negativeWords.forEach(word => {
-      if (lowerText.includes(word)) score--;
-    });
-
-    if (score > 0) return 'positive';
-    if (score < 0) return 'negative';
-    return 'neutral';
+    const lower = text.toLowerCase();
+    const pos = ['bullish', 'surge', 'rally', 'gain', 'up', 'rise', 'buy', 'strong'].filter(w => lower.includes(w)).length;
+    const neg = ['bearish', 'crash', 'dump', 'loss', 'down', 'fall', 'sell', 'fear'].filter(w => lower.includes(w)).length;
+    return pos > neg ? 'positive' : neg > pos ? 'negative' : 'neutral';
   }
 
-  /**
-   * Calculate news sentiment score
-   */
   private calculateNewsSentiment(articles: NewsArticle[]): number {
-    if (articles.length === 0) return 0;
-
-    let score = 0;
-    articles.forEach(article => {
-      if (article.sentiment === 'positive') score += 10;
-      else if (article.sentiment === 'negative') score -= 10;
-    });
-
-    return Math.max(-100, Math.min(100, score / articles.length * 10));
+    if (!articles.length) return 0;
+    const score = articles.reduce((s, a) =>
+      s + (a.sentiment === 'positive' ? 10 : a.sentiment === 'negative' ? -10 : 0), 0);
+    return Math.max(-100, Math.min(100, (score / articles.length) * 10));
   }
 }
 

@@ -1,0 +1,25 @@
+# Log rotation for the Trading Bot stack
+# Rotates: ib_service.log, nextjs.log, trading-bot.log, websocket-server.log, worldmonitor.log
+# Runs daily; keeps 14 days of compressed history.
+# Each log is truncated in-place (copytruncate) so running processes continue
+# writing to the same file descriptor without needing a restart or SIGHUP.
+
+/home/aiserver/Trading\ Project/ib_service.log
+/home/aiserver/Trading\ Project/nextjs.log
+/home/aiserver/Trading\ Project/trading-bot.log
+/home/aiserver/Trading\ Project/websocket-server.log
+/home/aiserver/Trading\ Project/worldmonitor.log
+/home/aiserver/Trading\ Project/build.log
+/home/aiserver/Trading\ Project/prisma-studio.log
+{
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    dateext
+    dateformat -%Y%m%d
+    su aiserver aiserver
+}

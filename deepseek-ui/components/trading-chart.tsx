@@ -17,21 +17,14 @@ export default function TradingChart({ pair, interval = 60, height = 400 }: Trad
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let cleanupFn: (() => void) | undefined;
+    let initialized = false;
+    let visibilityObserver: ResizeObserver | null = null;
 
     const initChart = async () => {
-      // Wait for the DOM element to be available and have dimensions
       if (!containerRef.current) return;
-
-      // If the container has no width yet, wait a few frames for layout to settle
-      let attempts = 0;
-      while (containerRef.current && containerRef.current.clientWidth === 0 && attempts < 10) {
-        await new Promise(resolve => requestAnimationFrame(resolve));
-        attempts++;
-      }
-
-      // Double-check after the frame
-      if (!containerRef.current || containerRef.current.clientWidth === 0) return;
+      if (containerRef.current.clientWidth === 0) return; // still hidden
+      if (initialized) return;
+      initialized = true;
 
       // Capture a stable reference to the DOM node
       const container = containerRef.current;
@@ -129,9 +122,16 @@ export default function TradingChart({ pair, interval = 60, height = 400 }: Trad
       }
     };
 
+    // Try immediately, then watch for the container becoming visible (e.g. tab switch)
     initChart();
 
+    if (containerRef.current) {
+      visibilityObserver = new ResizeObserver(() => initChart());
+      visibilityObserver.observe(containerRef.current);
+    }
+
     return () => {
+      visibilityObserver?.disconnect();
       if (chartRef.current) {
         chartRef.current.remove();
         chartRef.current = null;

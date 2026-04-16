@@ -3,6 +3,13 @@
  * Implements RSI, MACD, Bollinger Bands, EMA, and other indicators
  */
 
+import { TIMEOUTS } from '@/lib/timeouts';
+import { createLogger } from '@/lib/logger';
+import { ohlcCache } from '@/lib/cache';
+import { validateOHLCData } from '@/lib/data-quality';
+
+const log = createLogger('technical-indicators');
+
 export interface PriceData {
   timestamp: number;
   open: number;
@@ -297,6 +304,17 @@ export async function getHistoricalPrices(
   symbol: string,
   interval: number = 5,  // minutes
 ): Promise<PriceData[]> {
+  // Cache daily bars for 5 minutes — they don’t change intraday
+  if (interval >= 1440) {
+    return ohlcCache.getOrFetch(`${symbol}:${interval}`, () => _fetchHistoricalPrices(symbol, interval));
+  }
+  return _fetchHistoricalPrices(symbol, interval);
+}
+
+async function _fetchHistoricalPrices(
+  symbol: string,
+  interval: number = 5,
+): Promise<PriceData[]> {
   // Map interval (minutes) to IB bar size + duration that yields 100+ bars
   let barSize: string;
   let duration: string;
@@ -312,13 +330,13 @@ export async function getHistoricalPrices(
 
   try {
     const response = await fetch(`${baseUrl}/api/ib/ohlc?${params}`, {
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(TIMEOUTS.HISTORICAL_MS),
     });
     if (!response.ok) throw new Error(`OHLC route ${response.status}`);
     const data: { success: boolean; bars: { time: string; open: number; high: number; low: number; close: number; volume: number }[] } = await response.json();
     if (!data.success || !data.bars?.length) throw new Error('No bars returned');
 
-    return data.bars.map(bar => ({
+    const rawBars = data.bars.map(bar => ({
       timestamp: new Date(bar.time).getTime(),
       open:   bar.open,
       high:   bar.high,
@@ -326,8 +344,15 @@ export async function getHistoricalPrices(
       close:  bar.close,
       volume: bar.volume,
     }));
+
+    // Validate data quality before returning
+    const { filteredBars, warnings } = validateOHLCData(rawBars, symbol);
+    if (warnings.length > 0) {
+      log.warn('OHLC data quality issues', { symbol, warnings });
+    }
+    return filteredBars;
   } catch (error) {
-    console.error(`Failed to fetch historical prices for ${symbol}:`, error);
+    log.error('Failed to fetch historical prices', { symbol, error: String(error) });
     return [];
   }
 }

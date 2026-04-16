@@ -5,6 +5,9 @@
 
 import { prisma } from './db';
 import { Prisma } from '@prisma/client';
+import { createLogger } from './logger';
+
+const log = createLogger('bot-state');
 
 export interface BotConfig {
   pairs: string[];
@@ -50,7 +53,7 @@ export async function getBotState(): Promise<BotStateData> {
       config: state.config as BotConfig | null,
     };
   } catch (error) {
-    console.error('[BotState] Failed to get bot state:', error);
+    log.error('Failed to get bot state', { error: String(error) });
     return {
       isRunning: false,
       startedAt: null,
@@ -65,7 +68,7 @@ export async function getBotState(): Promise<BotStateData> {
  */
 export async function setBotRunning(config: BotConfig): Promise<void> {
   try {
-    console.log('[BotState] Saving bot state to database...');
+    log.info('Saving bot state to database');
     await prisma.botState.upsert({
       where: { id: 1 },
       update: {
@@ -82,9 +85,9 @@ export async function setBotRunning(config: BotConfig): Promise<void> {
         config: config as any,
       },
     });
-    console.log('[BotState] Bot state saved successfully');
+    log.info('Bot state saved successfully');
   } catch (error) {
-    console.error('[BotState] Failed to set bot running:', error);
+    log.error('Failed to set bot running', { error: String(error) });
   }
 }
 
@@ -93,7 +96,7 @@ export async function setBotRunning(config: BotConfig): Promise<void> {
  */
 export async function setBotStopped(): Promise<void> {
   try {
-    console.log('[BotState] Setting bot as stopped...');
+    log.info('Setting bot as stopped');
     await prisma.botState.upsert({
       where: { id: 1 },
       update: {
@@ -107,9 +110,9 @@ export async function setBotStopped(): Promise<void> {
         config: Prisma.JsonNull,
       },
     });
-    console.log('[BotState] Bot stopped state saved');
+    log.info('Bot stopped state saved');
   } catch (error) {
-    console.error('[BotState] Failed to set bot stopped:', error);
+    log.error('Failed to set bot stopped', { error: String(error) });
   }
 }
 

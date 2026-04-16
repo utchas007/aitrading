@@ -1,4 +1,5 @@
 /**
+ * 
  * Standalone WebSocket Server for Real-Time Trading Updates
  * Run with: npx ts-node websocket-server.ts
  * Or: node -r ts-node/register websocket-server.ts
@@ -6,9 +7,12 @@
 
 import { Server as SocketIOServer } from 'socket.io';
 import { createServer } from 'http';
+import { createLogger } from './lib/logger';
 
-const PORT = 3002;
-const POLL_INTERVAL = 3000; // 3 seconds
+const log = createLogger('websocket-server');
+
+const PORT = parseInt(process.env.WS_PORT ?? '3002', 10);
+const POLL_INTERVAL = parseInt(process.env.WS_POLL_INTERVAL_MS ?? '3000', 10);
 
 // Cache for latest data
 const latestData: {
@@ -47,9 +51,13 @@ async function fetchWithTimeout(url: string, timeout = 5000): Promise<any> {
   }
 }
 
+// Service URLs — configurable via env vars so this works in any environment
+const NEXTJS_URL   = process.env.NEXTJS_URL   ?? 'http://localhost:3001';
+const IB_SERVICE_URL = process.env.IB_SERVICE_URL ?? 'http://localhost:8765';
+
 async function fetchAndBroadcast(io: SocketIOServer) {
-  const baseUrl = 'http://localhost:3001';
-  const ibUrl = 'http://localhost:8765';
+  const baseUrl = NEXTJS_URL;
+  const ibUrl   = IB_SERVICE_URL;
 
   try {
     const [pricesRes, balanceRes, positionsRes, engineRes, healthRes] = await Promise.all([
@@ -60,15 +68,22 @@ async function fetchAndBroadcast(io: SocketIOServer) {
       fetchWithTimeout(`${ibUrl}/health`),
     ]);
 
-    // Prices
+    // Prices — delta update: only broadcast symbols whose price actually changed
     if (pricesRes?.success && pricesRes.data) {
-      const changed = Object.keys(pricesRes.data).some(
-        sym => JSON.stringify(pricesRes.data[sym]) !== JSON.stringify(latestData.prices[sym])
-      );
-      if (changed) {
-        latestData.prices = pricesRes.data;
-        io.emit('prices', pricesRes.data);
-        console.log(`[WS] Broadcasted prices for ${Object.keys(pricesRes.data).length} symbols`);
+      const delta: Record<string, unknown> = {};
+      for (const sym of Object.keys(pricesRes.data)) {
+        if (JSON.stringify(pricesRes.data[sym]) !== JSON.stringify(latestData.prices[sym])) {
+          delta[sym] = pricesRes.data[sym];
+        }
+      }
+      if (Object.keys(delta).length > 0) {
+        // Merge changed symbols into full cache
+        latestData.prices = { ...latestData.prices, ...pricesRes.data };
+        // Emit only the diff — clients merge delta into their local state
+        io.emit('pricesDelta', delta);
+        // Also emit full snapshot so late-joining clients get everything
+        io.emit('prices', latestData.prices);
+        log.debug('Broadcasted price delta', { changed: Object.keys(delta).length });
       }
     }
 
@@ -100,7 +115,7 @@ async function fetchAndBroadcast(io: SocketIOServer) {
         const current = currentWatchlist.slice().sort().join(',');
         if (joined !== current) {
           currentWatchlist = botPairs;
-          console.log(`[WS] Watchlist updated from bot config: ${botPairs.join(', ')}`);
+          log.info('Watchlist updated from bot config', { pairs: botPairs.join(', ') });
         }
       }
 
@@ -130,22 +145,63 @@ async function fetchAndBroadcast(io: SocketIOServer) {
       }
     }
   } catch (error) {
-    console.error('[WS] Error fetching data:', error);
+    log.error('Error fetching data', { error: String(error) });
   }
 }
 
 // Create HTTP server and Socket.IO
 const httpServer = createServer();
+// Build CORS origin list from env (comma-separated) with localhost defaults
+const WS_CORS_ORIGINS = (process.env.WS_CORS_ORIGINS ?? 'http://localhost:3001,http://localhost:3000')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: ['http://localhost:3001', 'http://localhost:3000', '*'],
+    origin: WS_CORS_ORIGINS,
     methods: ['GET', 'POST'],
   },
   transports: ['websocket', 'polling'],
+  // WebSocket per-message compression (permessage-deflate)
+  // Reduces bandwidth for large price/position payloads significantly.
+  perMessageDeflate: {
+    zlibDeflateOptions: { chunkSize: 1024, memLevel: 7, level: 3 },
+    zlibInflateOptions: { chunkSize: 10 * 1024 },
+    clientNoContextTakeover: true,
+    serverNoContextTakeover: true,
+    serverMaxWindowBits: 10,
+    concurrencyLimit: 10,
+    threshold: 1024, // Only compress payloads > 1KB
+  },
+  // Ping/pong to detect dead connections and trigger client reconnect
+  pingTimeout:  20_000,
+  pingInterval: 15_000,
 });
 
+// Per-symbol subscriptions: clients send { symbols: ['AAPL', 'MSFT'] } to filter
+// their price updates. Default: receive all symbols in the watchlist.
+const clientSymbols = new Map<string, Set<string>>();
+
 io.on('connection', (socket) => {
-  console.log(`[WS] Client connected: ${socket.id}`);
+  log.info('Client connected', { id: socket.id });
+
+  // Per-symbol subscription: client can send { symbols: ['AAPL', 'MSFT'] } to filter
+  socket.on('subscribe', (data: { symbols?: string[] }) => {
+    if (data?.symbols?.length) {
+      const syms = new Set(data.symbols.map((s: string) => s.toUpperCase()));
+      clientSymbols.set(socket.id, syms);
+      log.debug('Client subscribed to symbols', { id: socket.id, symbols: [...syms] });
+      // Send current prices filtered to subscribed symbols
+      const filtered: Record<string, unknown> = {};
+      for (const sym of syms) {
+        if (latestData.prices[sym]) filtered[sym] = latestData.prices[sym];
+      }
+      if (Object.keys(filtered).length > 0) socket.emit('prices', filtered);
+    } else {
+      clientSymbols.delete(socket.id); // Subscribe to all
+    }
+  });
 
   // Send cached data to new client
   if (Object.keys(latestData.prices).length > 0) socket.emit('prices', latestData.prices);
@@ -156,7 +212,8 @@ io.on('connection', (socket) => {
   if (latestData.ibHealth) socket.emit('ibHealth', latestData.ibHealth);
 
   socket.on('disconnect', () => {
-    console.log(`[WS] Client disconnected: ${socket.id}`);
+    clientSymbols.delete(socket.id);
+    log.info('Client disconnected', { id: socket.id });
   });
 });
 
@@ -167,11 +224,5 @@ setInterval(() => fetchAndBroadcast(io), POLL_INTERVAL);
 fetchAndBroadcast(io);
 
 httpServer.listen(PORT, () => {
-  console.log('================================================');
-  console.log('  WebSocket Server for Real-Time Trading');
-  console.log('================================================');
-  console.log(`  URL: ws://localhost:${PORT}`);
-  console.log(`  Poll interval: ${POLL_INTERVAL}ms`);
-  console.log(`  Watchlist: ${currentWatchlist.join(', ')} (syncs with bot config)`);
-  console.log('================================================');
+  log.info('WebSocket server started', { port: PORT, pollIntervalMs: POLL_INTERVAL, watchlist: currentWatchlist.join(', ') });
 });

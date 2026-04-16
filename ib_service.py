@@ -14,12 +14,29 @@ Prerequisites:
 """
 
 import asyncio
+import logging
 import math
 import os
+import sys
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, time as dt_time
 from typing import Optional
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+_LOG_LEVEL_STR = os.getenv("IB_LOG_LEVEL", "INFO").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_STR, None)
+if not isinstance(_LOG_LEVEL, int):
+    print(f"[ib_service] Invalid IB_LOG_LEVEL '{_LOG_LEVEL_STR}' — valid: DEBUG INFO WARN ERROR. Defaulting to INFO.", file=sys.stderr)
+    _LOG_LEVEL = logging.INFO
+
+logging.basicConfig(
+    level=_LOG_LEVEL,
+    format="%(asctime)s %(levelname)-5s [ib_service] %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("ib_service")
 
 import pytz
 
@@ -115,7 +132,7 @@ SERVICE_PORT= int(os.getenv("IB_SERVICE_PORT", "8765"))
 # If unset the service is unauthenticated (safe for localhost-only setups).
 _API_KEY: str | None = os.getenv("IB_API_KEY") or None
 if _API_KEY:
-    print(f"[IB] API key auth ENABLED (X-API-Key header required)")
+    logger.info("API key auth ENABLED (X-API-Key header required)")
 
 # ─── IB runs in its own background thread with its own event loop ─────────────
 ib        = IB()
@@ -182,20 +199,20 @@ def _ib_thread_main():
         try:
             await ib.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT, timeout=15)
             accounts = ib.managedAccounts()
-            print(f"[IB] Connected — accounts: {accounts}")
+            logger.info(f"Connected — accounts: {accounts}")
             _last_connected = datetime.now(EASTERN)
             # Subscribe to account updates so accountValues() and positions() are populated
             if accounts:
                 # ib_insync's reqAccountUpdates() is auto-called on connect - just wait for data
-                print(f"[IB] Waiting for account data for {accounts[0]}...")
+                logger.debug(f"Waiting for account data for {accounts[0]}...")
                 await asyncio.sleep(3)  # Give time for initial account data to arrive
                 vals = ib.accountValues()
-                print(f"[IB] Got {len(vals)} account values")
+                logger.info(f"Got {len(vals)} account values")
             # Start auto-reconnect monitor for daily IB reset
             _ib_loop.create_task(_auto_reconnect_monitor())
         except Exception as e:
-            print(f"[IB] Startup connect failed: {e}")
-            print(f"[IB] Will retry on first request. Make sure TWS/Gateway is on port {IB_PORT}.")
+            logger.error(f"Startup connect failed: {e}")
+            logger.warning(f"Will retry on first request. Make sure TWS/Gateway is on port {IB_PORT}.")
         finally:
             _ib_ready.set()  # signal main thread regardless of success/failure
 
@@ -203,46 +220,65 @@ def _ib_thread_main():
     _ib_loop.run_forever()    # keep running for callbacks and reconnects
 
 
+async def _connect_with_backoff(
+    context: str,
+    initial_delay: float = 5.0,
+    max_delay: float = 120.0,
+    max_attempts: int = 10,
+) -> bool:
+    """
+    Attempt to reconnect to IB TWS/Gateway with exponential backoff.
+
+    Delays: 5 → 10 → 20 → 40 → 80 → 120 → 120 → ... seconds (capped at max_delay).
+    Returns True if connected, False if all attempts exhausted.
+    """
+    global _last_connected
+    delay = initial_delay
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await ib.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT, timeout=15)
+            if ib.isConnected():
+                _last_connected = datetime.now(EASTERN)
+                accounts = ib.managedAccounts()
+                logger.info(f"[{context}] Connected — accounts: {accounts} (attempt {attempt})")
+                await asyncio.sleep(3)   # let account data settle
+                return True
+        except Exception as e:
+            logger.warning(f"[{context}] Attempt {attempt}/{max_attempts} failed: {e}")
+        if attempt < max_attempts:
+            logger.info(f"[{context}] Retrying in {delay:.0f}s...")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, max_delay)
+    logger.error(f"[{context}] All {max_attempts} attempts exhausted.")
+    return False
+
+
 async def _auto_reconnect_monitor():
     """
     Monitor IB connection and auto-reconnect if dropped.
     IB has a daily server reset around 11:45 PM - 12:00 AM ET.
     This task runs every 30 seconds to check connection status.
+    Uses exponential backoff: 5 → 10 → 20 → 40 → 80 → 120s (capped).
     """
-    global _last_connected
-    print("[IB] Auto-reconnect monitor started (handles daily 11:45 PM ET reset)")
-    
+    logger.info("Auto-reconnect monitor started (handles daily 11:45 PM ET reset)")
+
     while True:
         await asyncio.sleep(30)  # Check every 30 seconds
-        
+
         try:
             if not ib.isConnected():
                 now_et = datetime.now(EASTERN)
-                print(f"[IB] Connection lost at {now_et.strftime('%Y-%m-%d %H:%M:%S ET')}")
-                print("[IB] Attempting to reconnect...")
-                
-                # Wait a bit before reconnecting (IB may still be resetting)
-                await asyncio.sleep(5)
-                
-                # Try to reconnect with retries
-                for attempt in range(5):
-                    try:
-                        await ib.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT, timeout=15)
-                        if ib.isConnected():
-                            _last_connected = datetime.now(EASTERN)
-                            accounts = ib.managedAccounts()
-                            print(f"[IB] Reconnected successfully! Accounts: {accounts}")
-                            # Wait for account data
-                            await asyncio.sleep(3)
-                            break
-                    except Exception as e:
-                        print(f"[IB] Reconnect attempt {attempt + 1}/5 failed: {e}")
-                        await asyncio.sleep(10)  # Wait 10 seconds between retries
-                
-                if not ib.isConnected():
-                    print("[IB] Failed to reconnect after 5 attempts. Will keep trying...")
+                logger.warning(f"Connection lost at {now_et.strftime('%Y-%m-%d %H:%M:%S ET')}")
+                connected = await _connect_with_backoff(
+                    context="auto-reconnect",
+                    initial_delay=5.0,
+                    max_delay=120.0,
+                    max_attempts=10,
+                )
+                if not connected:
+                    logger.error("Could not reconnect after 10 attempts. Will retry next monitor cycle.")
         except Exception as e:
-            print(f"[IB] Auto-reconnect monitor error: {e}")
+            logger.error(f"Auto-reconnect monitor error: {e}")
 
 
 def _start_ib_thread():
@@ -267,27 +303,31 @@ async def _ib(coro, timeout: int = 65):
 
 
 async def ensure_connected():
-    """Reconnect if session dropped, then wait for IB subscriptions to settle."""
+    """
+    Reconnect if session dropped, with exponential backoff (up to 5 attempts).
+    Delays: 1 → 2 → 4 → 8 → 16s. Raises HTTP 503 if all attempts fail.
+    """
     if not ib.isConnected():
         with _ib_lock:
             if not ib.isConnected():
                 event = threading.Event()
+                success_flag = [False]
+
                 async def _reconnect():
-                    try:
-                        await ib.connectAsync(IB_HOST, IB_PORT, clientId=IB_CLIENT, timeout=15)
-                        print(f"[IB] Reconnected to {IB_HOST}:{IB_PORT}")
-                        # Wait for account data after reconnect
-                        accounts = ib.managedAccounts()
-                        if accounts:
-                            print(f"[IB] Waiting for account data after reconnect...")
-                    except Exception as e:
-                        raise HTTPException(status_code=503, detail=f"IB reconnect failed: {e}")
-                    finally:
-                        event.set()
+                    connected = await _connect_with_backoff(
+                        context="ensure_connected",
+                        initial_delay=1.0,
+                        max_delay=16.0,
+                        max_attempts=5,
+                    )
+                    success_flag[0] = connected
+                    event.set()
+
                 asyncio.run_coroutine_threadsafe(_reconnect(), _ib_loop)
-                event.wait(timeout=20)
+                event.wait(timeout=60)  # worst case: 1+2+4+8+16 = 31s + connect timeouts
+
         if not ib.isConnected():
-            raise HTTPException(status_code=503, detail="Cannot connect to IB TWS/Gateway")
+            raise HTTPException(status_code=503, detail="Cannot connect to IB TWS/Gateway after retries")
         # Let IB internal subscriptions settle before making contract/market requests
         await asyncio.sleep(5)
 
@@ -344,15 +384,20 @@ async def lifespan(app: FastAPI):
     try:
         if ib.isConnected():
             ib.disconnect()
-            print("[IB] Disconnected.")
+            logger.info("Disconnected.")
     except Exception as e:
-        print(f"[IB] Shutdown disconnect error (safe to ignore): {e}")
+        logger.debug(f"Shutdown disconnect error (safe to ignore): {e}")
 
 
 app = FastAPI(title="IB Trading Service", version="1.0.0", lifespan=lifespan)
+# CORS allowed origins — configurable via IB_CORS_ORIGINS env var (comma-separated).
+# Default: localhost:3001 (Next.js) and localhost:3000 (World Monitor).
+_cors_origins_str = os.getenv("IB_CORS_ORIGINS", "http://localhost:3001,http://localhost:3000")
+_cors_origins = [o.strip() for o in _cors_origins_str.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3001", "http://localhost:3000"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -513,7 +558,7 @@ async def get_orders():
             "action":          t.order.action,
             "quantity":        t.order.totalQuantity,
             "order_type":      t.order.orderType,
-            "limit_price":     getattr(t.order, "lmtPrice", None),
+            "limit_price":     getattr(t.order, "auxPrice", None) if t.order.orderType == "STP" else getattr(t.order, "lmtPrice", None),
             "status":          t.orderStatus.status,
             "filled":          t.orderStatus.filled,
             "remaining":       t.orderStatus.remaining,
@@ -730,4 +775,15 @@ if __name__ == "__main__":
     print()
     print("  Override: IB_HOST, IB_PORT, IB_CLIENT, IB_SERVICE_PORT env vars")
     print("=" * 60)
-    uvicorn.run("ib_service:app", host="0.0.0.0", port=SERVICE_PORT, reload=False)
+    # Suppress uvicorn's per-request access logs for noisy health/status polls.
+    # Access log level is controlled by IB_ACCESS_LOG env var (default: off).
+    # Set IB_ACCESS_LOG=1 to re-enable full request logging.
+    access_log = os.getenv("IB_ACCESS_LOG", "0") == "1"
+    uvicorn.run(
+        "ib_service:app",
+        host="0.0.0.0",
+        port=SERVICE_PORT,
+        reload=False,
+        access_log=access_log,
+        log_level=_LOG_LEVEL_STR.lower(),
+    )

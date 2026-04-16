@@ -91,6 +91,11 @@ model ActivityLog {
   @@index([createdAt])
   @@index([type])
   @@index([pair])
+  // Composite indexes for common range queries:
+  //   - filter by type within a time window (e.g. "all errors in the last 24h")
+  //   - filter by pair within a time window (e.g. "all AAPL activity today")
+  @@index([createdAt, type])
+  @@index([pair, createdAt])
 }
 
 model MarketIntelligence {
@@ -156,14 +161,15 @@ model ChatMessage {
 model Notification {
   id        Int      @id @default(autoincrement())
   createdAt DateTime @default(now())
-  type      String   // 'trade_executed', 'trade_failed', 'ib_disconnected', 'bot_stopped'
+  type      String   // 'trade_executed', 'trade_failed', 'trade_closed', 'ib_disconnected', 'bot_stopped', 'alert_*'
   title     String
   message   String
-  pair      String?
+  pair      String?  // nullable — not all alerts relate to a specific stock
   read      Boolean  @default(false)
 
-  @@index([createdAt])
-  @@index([read])
+  @@index([createdAt])        // used by retention cleanup (DELETE WHERE createdAt < cutoff)
+  @@index([read])             // used by unread count query
+  @@index([pair, createdAt])  // used by per-stock notification history
 }
 
 model BotState {

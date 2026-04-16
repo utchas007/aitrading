@@ -43,7 +43,7 @@ describe("createRiskManager", () => {
     expect(p.maxPortfolioRisk).toBe(0.02);
     expect(p.stopLossPercent).toBe(0.05);
     expect(p.takeProfitPercent).toBe(0.10);
-    expect(p.maxOpenPositions).toBe(3);
+    expect(p.maxOpenPositions).toBe(6);
     expect(p.minConfidence).toBe(70);
   });
 

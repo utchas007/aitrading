@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Pre-commit hook: run lint + type-check + tests on staged files before committing.
+# Installed by: npx husky init (from deepseek-ui/ or project root)
+#
+# SETUP:
+#   cd deepseek-ui
+#   npm install          # installs husky + lint-staged
+#   npx husky init       # creates .husky/pre-commit
+#   npx husky add .husky/pre-commit "cd deepseek-ui && npx lint-staged"
+
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Run lint-staged from the deepseek-ui subdirectory
+cd deepseek-ui && npx lint-staged

@@ -5,6 +5,9 @@
 
 import fs from 'fs';
 import path from 'path';
+import { createLogger } from './logger';
+
+const log = createLogger('portfolio-tracker');
 
 export interface PortfolioSnapshot {
   timestamp: number;
@@ -46,7 +49,7 @@ export function loadPortfolioHistory(): PortfolioSnapshot[] {
     const data = fs.readFileSync(PORTFOLIO_FILE, 'utf-8');
     return JSON.parse(data);
   } catch (error) {
-    console.error('Error loading portfolio history:', error);
+    log.error('Failed to load portfolio history', { error: String(error) });
     return [];
   }
 }

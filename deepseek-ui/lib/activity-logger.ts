@@ -4,6 +4,57 @@
  * Also persists to PostgreSQL database
  */
 
+import { createLogger } from './logger';
+
+const log = createLogger('activity');
+
+/** Retention period for ActivityLog rows (default: 90 days). */
+const ACTIVITY_RETENTION_DAYS = parseInt(process.env.ACTIVITY_LOG_RETENTION_DAYS ?? '90', 10);
+
+/** Retention period for Notification rows (default: 90 days). */
+const NOTIFICATION_RETENTION_DAYS = parseInt(process.env.NOTIFICATION_RETENTION_DAYS ?? '90', 10);
+
+/**
+ * Run cleanup once at startup and then every 24 hours.
+ * Deletes rows older than the configured retention period from:
+ *   - ActivityLog  (default 90 days)
+ *   - Notification (default 90 days)
+ */
+async function startRetentionCleanup(): Promise<void> {
+  const runCleanup = async () => {
+    try {
+      const { prisma } = await import('./db');
+
+      // ActivityLog cleanup
+      const activityCutoff = new Date(Date.now() - ACTIVITY_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+      const activityResult = await prisma.activityLog.deleteMany({
+        where: { createdAt: { lt: activityCutoff } },
+      });
+      if (activityResult.count > 0) {
+        log.info(`ActivityLog retention: deleted ${activityResult.count} rows older than ${ACTIVITY_RETENTION_DAYS} days`);
+      }
+
+      // Notification cleanup
+      const notificationCutoff = new Date(Date.now() - NOTIFICATION_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+      const notificationResult = await prisma.notification.deleteMany({
+        where: { createdAt: { lt: notificationCutoff } },
+      });
+      if (notificationResult.count > 0) {
+        log.info(`Notification retention: deleted ${notificationResult.count} rows older than ${NOTIFICATION_RETENTION_DAYS} days`);
+      }
+    } catch (e: any) {
+      log.warn('Retention cleanup failed', { error: e?.message ?? String(e) });
+    }
+  };
+
+  // Run immediately on startup, then every 24 hours
+  await runCleanup();
+  setInterval(runCleanup, 24 * 60 * 60 * 1000);
+}
+
+// Kick off cleanup in background — never blocks the logger init
+void startRetentionCleanup();
+
 // Async DB write — fire and forget, never blocks the bot
 async function persistToDb(type: string, message: string, pair?: string): Promise<void> {
   try {
@@ -24,6 +75,7 @@ async function loadFromDb(limit: number = 50): Promise<Activity[]> {
     const dbActivities = await prisma.activityLog.findMany({
       orderBy: { createdAt: 'desc' },
       take: limit,
+      select: { id: true, createdAt: true, type: true, message: true, pair: true },
     });
     return dbActivities.map((a: any) => ({
       id: String(a.id),
@@ -135,9 +187,8 @@ export class ActivityLogger {
     // Notify listeners
     this.listeners.forEach(listener => listener(activity));
 
-    // Console log with color
-    const timeStr = new Date(activity.timestamp).toLocaleTimeString();
-    console.log(`[${timeStr}] ${activity.icon} ${message}`);
+    // Log to structured logger
+    log.info(`${activity.icon} ${message}`, { type });
 
     // Persist to database (fire and forget)
     persistToDb(type, message);

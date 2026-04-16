@@ -1,0 +1,32 @@
+[Unit]
+Description=Trading Bot — WebSocket Server (Port 3002)
+Documentation=file:///home/aiserver/Trading Project/STARTUP_GUIDE.md
+After=network.target nextjs.service
+Wants=nextjs.service
+
+[Service]
+Type=simple
+User=aiserver
+Group=aiserver
+WorkingDirectory=/home/aiserver/Trading Project/deepseek-ui
+
+EnvironmentFile=-/home/aiserver/Trading Project/deepseek-ui/.env.local
+Environment="NODE_ENV=production"
+Environment="PATH=/home/aiserver/.nvm/versions/node/v24.14.1/bin:/usr/bin:/usr/local/bin"
+
+ExecStart=/home/aiserver/.nvm/versions/node/v24.14.1/bin/npx tsx websocket-server.ts
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+StandardOutput=append:/home/aiserver/Trading Project/websocket-server.log
+StandardError=append:/home/aiserver/Trading Project/websocket-server.log
+
+[Install]
+WantedBy=multi-user.target

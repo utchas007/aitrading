@@ -1,0 +1,34 @@
+[Unit]
+Description=Trading Bot — Standalone Bot Process (Port 3002)
+Documentation=file:///home/aiserver/Trading Project/STARTUP_GUIDE.md
+After=network.target nextjs.service
+Wants=nextjs.service
+
+[Service]
+Type=simple
+User=aiserver
+Group=aiserver
+WorkingDirectory=/home/aiserver/Trading Project/deepseek-ui
+
+EnvironmentFile=-/home/aiserver/Trading Project/deepseek-ui/.env.local
+Environment="NODE_ENV=production"
+Environment="PATH=/home/aiserver/.nvm/versions/node/v24.14.1/bin:/usr/bin:/usr/local/bin"
+
+ExecStart=/home/aiserver/.nvm/versions/node/v24.14.1/bin/npx tsx scripts/trading-bot.ts
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+StandardOutput=append:/home/aiserver/Trading Project/trading-bot.log
+StandardError=append:/home/aiserver/Trading Project/trading-bot.log
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

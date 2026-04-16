@@ -41,6 +41,15 @@ jobs:
       run:
         working-directory: deepseek-ui
 
+    env:
+      DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci_db"
+      IB_SERVICE_URL: "http://localhost:8765"
+      OLLAMA_API_URL: "http://localhost:11434"
+      OLLAMA_MODEL: "deepseek-r1:14b"
+      WORLDMONITOR_URL: "http://localhost:3000"
+      LOG_LEVEL: "warn"
+      NODE_ENV: "test"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -52,6 +61,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client (required for type imports)
+        run: npx prisma generate
 
       - name: Run tests
         run: npm test

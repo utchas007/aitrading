@@ -4,6 +4,20 @@
  * Yahoo Finance / Reuters news headlines, and provides multi-timeframe analysis support
  */
 
+import { TIMEOUTS } from '@/lib/timeouts';
+import { createLogger } from '@/lib/logger';
+import { fearGreedCache, vixCache, spyTrendCache } from '@/lib/cache';
+import {
+  VIX_LOW_THRESHOLD, VIX_ELEVATED_THRESHOLD, VIX_HIGH_THRESHOLD,
+  VIX_ELEVATED_SIZE_MULT, VIX_HIGH_SIZE_MULT, VIX_EXTREME_SIZE_MULT,
+  MAX_POSITION_FRACTION, SL_ATR_MULTIPLIER, TP_ATR_MULTIPLIER,
+  IB_MIN_FEE_CAD, IB_FEE_PER_SHARE_CAD, IB_MAX_FEE_FRACTION, MIN_PROFIT_FEE_MULTIPLIER,
+  EARNINGS_AVOID_DAYS, EARNINGS_CAUTION_DAYS, EARNINGS_CAUTION_SIZE_MULT,
+  BULLISH_SCORE_THRESHOLD, BEARISH_SCORE_THRESHOLD,
+} from '@/lib/constants';
+
+const log = createLogger('market-intelligence');
+
 export interface FearGreedData {
   value: number;
   classification: string;
@@ -117,7 +131,7 @@ export async function getEarningsData(symbol: string): Promise<EarningsData> {
       `https://www.earningswhispers.com/stocks/${symbol.toLowerCase()}`,
       {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)' },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
       }
     );
     if (!res.ok) throw new Error(`EarningsWhispers HTTP ${res.status}`);
@@ -153,11 +167,11 @@ export async function getEarningsData(symbol: string): Promise<EarningsData> {
     let interpretation: string;
     const timeLabel = earningsTime === 'pre' ? ' (before open)' : earningsTime === 'post' ? ' (after close)' : '';
 
-    if (daysUntil <= 2) {
+    if (daysUntil <= EARNINGS_AVOID_DAYS) {
       riskLevel = 'avoid';
       tradingAllowed = false;
       interpretation = `⚠️ ${symbol} earnings in ${daysUntil} day(s) — ${earningsDate.toDateString()}${timeLabel}. Trading BLOCKED — extreme gap risk.`;
-    } else if (daysUntil <= 7) {
+    } else if (daysUntil <= EARNINGS_CAUTION_DAYS) {
       riskLevel = 'caution';
       tradingAllowed = true;
       interpretation = `⚡ ${symbol} earnings in ${daysUntil} days — ${earningsDate.toDateString()}${timeLabel}. Reduce position size, tighten stops.`;
@@ -177,7 +191,7 @@ export async function getEarningsData(symbol: string): Promise<EarningsData> {
       interpretation,
     };
   } catch (err) {
-    console.warn(`Earnings data unavailable for ${symbol}:`, err);
+    log.warn('Earnings data unavailable', { symbol, error: String(err) });
     return {
       hasUpcomingEarnings: false, daysUntilEarnings: null, earningsDate: null,
       earningsTime: null, tradingAllowed: true, riskLevel: 'safe',
@@ -195,13 +209,18 @@ export async function getEarningsData(symbol: string): Promise<EarningsData> {
  *   - otherwise → sideways → neutral
  */
 export async function getSpyTrend(): Promise<SpyTrend> {
+  // Cached for 5 minutes
+  return spyTrendCache.getOrFetch('spy', () => _fetchSpyTrend());
+}
+
+async function _fetchSpyTrend(): Promise<SpyTrend> {
   try {
     // Fetch 1 year of daily data to compute 200MA
     const res = await fetch(
       'https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=1y',
       {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)' },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
       }
     );
     if (!res.ok) throw new Error(`Yahoo SPY HTTP ${res.status}`);
@@ -245,7 +264,7 @@ export async function getSpyTrend(): Promise<SpyTrend> {
 
     return { price, change1d, change5d, above200ma, trend, bias, interpretation, timestamp: new Date().toISOString() };
   } catch (err) {
-    console.warn('SPY trend unavailable:', err);
+    log.warn('SPY trend unavailable', { error: String(err) });
     return {
       price: 0, change1d: 0, change5d: 0, above200ma: true,
       trend: 'sideways', bias: 'neutral',
@@ -263,13 +282,13 @@ export async function getSpyTrend(): Promise<SpyTrend> {
  *   25-35 = high volatility, reduce size to 50%, tighten stops
  *   > 35  = extreme fear, do NOT trade (crash conditions)
  */
-export async function getVix(): Promise<VixData> {
+async function _fetchVix(): Promise<VixData> {
   try {
     const res = await fetch(
       'https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1d&range=1d',
       {
         headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)' },
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
       }
     );
     if (!res.ok) throw new Error(`Yahoo VIX HTTP ${res.status}`);
@@ -282,8 +301,7 @@ export async function getVix(): Promise<VixData> {
 
     return classifyVix(parseFloat(price));
   } catch (err) {
-    console.warn('VIX unavailable:', err);
-    // Return neutral fallback — don't block trading on data failure
+    log.warn('VIX unavailable, using neutral fallback', { error: String(err) });
     return classifyVix(20);
   }
 }
@@ -294,26 +312,26 @@ function classifyVix(value: number): VixData {
   let positionSizeMultiplier: number;
   let interpretation: string;
 
-  if (value < 15) {
+  if (value < VIX_LOW_THRESHOLD) {
     level = 'low';
     tradingAllowed = true;
     positionSizeMultiplier = 1.0;
     interpretation = `VIX ${value.toFixed(1)} — Low volatility. Normal market conditions. Full position size allowed.`;
-  } else if (value < 25) {
+  } else if (value < VIX_ELEVATED_THRESHOLD) {
     level = 'elevated';
     tradingAllowed = true;
-    positionSizeMultiplier = 0.75;
-    interpretation = `VIX ${value.toFixed(1)} — Elevated volatility. Proceed with caution. Use 75% of normal position size.`;
-  } else if (value < 35) {
+    positionSizeMultiplier = VIX_ELEVATED_SIZE_MULT;
+    interpretation = `VIX ${value.toFixed(1)} — Elevated volatility. Proceed with caution. Use ${VIX_ELEVATED_SIZE_MULT * 100}% of normal position size.`;
+  } else if (value < VIX_HIGH_THRESHOLD) {
     level = 'high';
     tradingAllowed = true;
-    positionSizeMultiplier = 0.5;
-    interpretation = `VIX ${value.toFixed(1)} — High volatility. Reduce position size to 50%. Tighten stop losses.`;
+    positionSizeMultiplier = VIX_HIGH_SIZE_MULT;
+    interpretation = `VIX ${value.toFixed(1)} — High volatility. Reduce position size to ${VIX_HIGH_SIZE_MULT * 100}%. Tighten stop losses.`;
   } else {
     level = 'extreme';
     tradingAllowed = false;
-    positionSizeMultiplier = 0.0;
-    interpretation = `VIX ${value.toFixed(1)} — EXTREME volatility. Trading blocked. Wait for VIX to drop below 35.`;
+    positionSizeMultiplier = VIX_EXTREME_SIZE_MULT;
+    interpretation = `VIX ${value.toFixed(1)} — EXTREME volatility. Trading blocked. Wait for VIX to drop below ${VIX_HIGH_THRESHOLD}.`;
   }
 
   return { value, level, tradingAllowed, positionSizeMultiplier, interpretation, timestamp: new Date().toISOString() };
@@ -324,6 +342,11 @@ function classifyVix(value: number): VixData {
  * Falls back to alternative.me (crypto) if CNN is unavailable
  */
 export async function getFearGreedIndex(): Promise<FearGreedData> {
+  // Cached for 1 hour — CNN rate-limits aggressively
+  return fearGreedCache.getOrFetch('feargreed', () => _fetchFearGreedIndex());
+}
+
+async function _fetchFearGreedIndex(): Promise<FearGreedData> {
   // Try CNN Fear & Greed first (stock market)
   try {
     const response = await fetch(
@@ -334,7 +357,7 @@ export async function getFearGreedIndex(): Promise<FearGreedData> {
           'Accept': 'application/json',
           'Referer': 'https://www.cnn.com/markets/fear-and-greed',
         },
-        signal: AbortSignal.timeout(6000),
+        signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
       }
     );
     if (response.ok) {
@@ -358,7 +381,7 @@ export async function getFearGreedIndex(): Promise<FearGreedData> {
   try {
     const response = await fetch('https://api.alternative.me/fng/?limit=1', {
       headers: { 'User-Agent': 'TradingBot/1.0' },
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
     });
     if (response.ok) {
       const data = await response.json();
@@ -373,6 +396,11 @@ export async function getFearGreedIndex(): Promise<FearGreedData> {
   } catch { /* ignore */ }
 
   return { value: 50, classification: 'Neutral', timestamp: new Date().toISOString(), source: 'fallback' };
+}
+
+export async function getVix(): Promise<VixData> {
+  // Cached for 15 minutes — VIX changes slowly intraday
+  return vixCache.getOrFetch('vix', () => _fetchVix());
 }
 
 function classifyFearGreed(value: number): string {
@@ -408,7 +436,7 @@ export async function getRedditSentiment(symbol: string = 'AAPL'): Promise<{
             'User-Agent': 'TradingBot/1.0 (by /u/tradingbot)',
             'Accept': 'application/json',
           },
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
         }
       );
       if (!response.ok) continue;
@@ -465,7 +493,7 @@ export async function getStockNewsHeadlines(symbol?: string): Promise<NewsHeadli
           'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)',
           'Accept': 'application/rss+xml, application/xml, text/xml, */*',
         },
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(TIMEOUTS.EXTERNAL_API_MS),
       });
       if (!response.ok) continue;
 
@@ -537,27 +565,27 @@ export function calculatePositionSize(
   const atrPercent = price > 0 ? (atr / price) * 100 : 0;
 
   // Earnings caution: reduce size further when within 7 days
-  const earningsMultiplier = earningsRisk === 'caution' ? 0.5 : 1.0;
+  const earningsMultiplier = earningsRisk === 'caution' ? EARNINGS_CAUTION_SIZE_MULT : 1.0;
   const combinedMultiplier = vixMultiplier * earningsMultiplier;
 
-  // Max position = 5% of account value, adjusted for risk
-  const maxPositionValue = accountValue * 0.05 * combinedMultiplier;
+  // Max position = MAX_POSITION_FRACTION of account value, adjusted for risk
+  const maxPositionValue = accountValue * MAX_POSITION_FRACTION * combinedMultiplier;
   const baseShares = price > 0 ? Math.floor(maxPositionValue / price) : 0;
   const finalShares = Math.max(1, baseShares);
 
   // Prices
-  const stopLossPrice  = parseFloat((price - atr * 1.5).toFixed(2));
-  const takeProfitPrice = parseFloat((price + atr * 2.0).toFixed(2));
+  const stopLossPrice  = parseFloat((price - atr * SL_ATR_MULTIPLIER).toFixed(2));
+  const takeProfitPrice = parseFloat((price + atr * TP_ATR_MULTIPLIER).toFixed(2));
 
   // IBKR Canada fee: max($1, shares × $0.01), capped at 0.5% of trade value
   const tradeValue = finalShares * price;
-  const rawFee = Math.max(1, finalShares * 0.01);
-  const cappedFee = Math.min(rawFee, tradeValue * 0.005);
+  const rawFee = Math.max(IB_MIN_FEE_CAD, finalShares * IB_FEE_PER_SHARE_CAD);
+  const cappedFee = Math.min(rawFee, tradeValue * IB_MAX_FEE_FRACTION);
   const estimatedFees = parseFloat(cappedFee.toFixed(2));
   const estimatedRoundTripFees = parseFloat((estimatedFees * 2).toFixed(2));
 
-  // Min profit = round trip fees × 3 (buffer for slippage + edge uncertainty at elevated VIX)
-  const minimumProfitNeeded = parseFloat((estimatedRoundTripFees * 3).toFixed(2));
+  // Min profit = round trip fees × MIN_PROFIT_FEE_MULTIPLIER (buffer for slippage + edge uncertainty)
+  const minimumProfitNeeded = parseFloat((estimatedRoundTripFees * MIN_PROFIT_FEE_MULTIPLIER).toFixed(2));
 
   // Expected profit if take-profit is hit
   const expectedProfit = parseFloat(((takeProfitPrice - price) * finalShares).toFixed(2));
@@ -616,8 +644,8 @@ export async function getMarketSentiment(pair: string): Promise<SentimentSummary
 
   const canTrade = vix.tradingAllowed && earnings.tradingAllowed;
   let overallSentiment: 'Bullish' | 'Bearish' | 'Neutral' = 'Neutral';
-  if (overallScore > 20 && canTrade && spyTrend.bias !== 'sell') overallSentiment = 'Bullish';
-  else if (overallScore < -20 || !canTrade || spyTrend.trend === 'downtrend') overallSentiment = 'Bearish';
+  if (overallScore > BULLISH_SCORE_THRESHOLD && canTrade && spyTrend.bias !== 'sell') overallSentiment = 'Bullish';
+  else if (overallScore < BEARISH_SCORE_THRESHOLD || !canTrade || spyTrend.trend === 'downtrend') overallSentiment = 'Bearish';
 
   return {
     fearGreed,
