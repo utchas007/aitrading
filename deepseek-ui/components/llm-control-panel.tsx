@@ -474,7 +474,7 @@ export default function LLMControlPanel() {
                     wordBreak: "break-word",
                     position: "relative",
                   }}>
-                    {msg.content}
+                    {msg.content.replace(/\nPENDING_TRADE:\{[^}]+\}/, '')}
                     {msg.streaming && (
                       <span style={{ 
                         display: "inline-block", 

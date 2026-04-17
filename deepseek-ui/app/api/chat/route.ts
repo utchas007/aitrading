@@ -299,11 +299,42 @@ export async function POST(req: NextRequest) {
     // ── Detect & execute trade commands from the latest user message ──────────
     const lastUserMsg = [...messages].reverse().find((m: any) => m.role === 'user');
     let tradeResult: TradeCommandResult | null = null;
+    let pendingConfirmation: string | null = null;
+
     if (lastUserMsg) {
-      const cmd = parseTradeCommand(lastUserMsg.content);
-      if (cmd) {
-        tradeResult = await executeTradeCommand(cmd);
-        log.info('Trade command executed', { executed: tradeResult.executed, symbol: tradeResult.symbol, action: tradeResult.action });
+      const userText = lastUserMsg.content.trim().toLowerCase();
+      const isConfirm = /^confirm$/.test(userText);
+
+      if (isConfirm) {
+        // Find the last assistant message that contains a pending trade marker
+        const lastAssistant = [...messages].reverse().find((m: any) => m.role === 'assistant');
+        const pendingMatch = lastAssistant?.content?.match(/PENDING_TRADE:(\{[^}]+\})/);
+        if (pendingMatch) {
+          try {
+            const cmd: ParsedCommand = JSON.parse(pendingMatch[1]);
+            tradeResult = await executeTradeCommand(cmd);
+            log.info('Trade confirmed and executed', { executed: tradeResult.executed, symbol: tradeResult.symbol, action: tradeResult.action });
+          } catch {
+            tradeResult = { executed: false, message: 'Failed to parse pending trade. Please try your command again.' };
+          }
+        } else {
+          tradeResult = { executed: false, message: 'No pending trade found to confirm. Please enter your trade command first.' };
+        }
+      } else {
+        const cmd = parseTradeCommand(lastUserMsg.content);
+        if (cmd) {
+          // Don't execute yet — ask for confirmation
+          const ib = createIBClient();
+          const positions = await ib.getPositions().catch(() => []) as any[];
+          const pos = positions.find((p: any) => p.symbol === cmd.symbol && p.position > 0);
+          const qty = cmd.quantity === 'all' ? (pos?.position ?? 'all') : cmd.quantity;
+          const price = cmd.action === 'buy' ? await getLatestPrice(cmd.symbol) : pos?.avg_cost ?? null;
+          const priceStr = price ? ` at ~$${(price as number).toFixed(2)}` : '';
+          const qtyStr = qty === 'all' ? `all ${pos?.position ?? ''} shares` : `${qty} shares`;
+
+          pendingConfirmation = `⚠️ **Confirmation required**\n\nYou want to **${cmd.action.toUpperCase()} ${qtyStr} of ${cmd.symbol}**${priceStr}.\n\nType **confirm** to execute this trade immediately, or ignore this message to cancel.\n\nPENDING_TRADE:${JSON.stringify(cmd)}`;
+          log.info('Trade command pending confirmation', { symbol: cmd.symbol, action: cmd.action, qty });
+        }
       }
     }
 
@@ -372,6 +403,11 @@ You are connected to the following LIVE data sources:
 You have FULL visibility into all this data below. Use it to provide informed, specific answers.
 DO NOT say you don't have access to markets, finance, or tech - you absolutely do!
 ===\n`;
+
+    // Return confirmation prompt immediately — no Ollama call needed
+    if (pendingConfirmation) {
+      return NextResponse.json({ response: pendingConfirmation, trade: null });
+    }
 
     // Inject trade execution result if a command was detected
     let tradeContext = '';
