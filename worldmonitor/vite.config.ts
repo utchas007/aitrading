@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import { resolve, dirname, extname } from 'path';
 import { mkdir, readFile, writeFile } from 'fs/promises';
@@ -6,6 +6,10 @@ import { brotliCompress } from 'zlib';
 import { promisify } from 'util';
 import pkg from './package.json';
 import { VARIANT_META } from './src/config/variant-meta';
+
+// Load .env.local into process.env so server-side API handlers can read them
+const _localEnv = loadEnv('development', process.cwd(), '');
+Object.assign(process.env, _localEnv);
 
 const isE2E = process.env.VITE_E2E === '1';
 const isDesktopBuild = process.env.VITE_DESKTOP_RUNTIME === '1';
@@ -576,6 +580,7 @@ function youtubeLivePlugin(): Plugin {
 }
 
 export default defineConfig({
+  envPrefix: ['VITE_', 'FINNHUB_', 'GROQ_', 'OPENROUTER_', 'FRED_', 'EIA_', 'OLLAMA_', 'ACLED_', 'OTX_', 'ABUSEIPDB_', 'AISSTREAM_', 'NASA_', 'UCDP_', 'WTO_', 'ICAO_', 'CLOUDFLARE_', 'WINGBITS_', 'OPENSKY_', 'AVIATIONSTACK_', 'WORLDMONITOR_', 'URLHAUS_'],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
