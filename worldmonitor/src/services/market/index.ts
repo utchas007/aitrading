@@ -9,6 +9,7 @@ import {
   MarketServiceClient,
   type ListMarketQuotesResponse,
   type ListCryptoQuotesResponse,
+  type ListCommodityQuotesResponse,
   type MarketQuote as ProtoMarketQuote,
   type CryptoQuote as ProtoCryptoQuote,
 } from '@/generated/client/worldmonitor/market/v1/service_client';
@@ -20,7 +21,7 @@ import { getHydratedData } from '@/services/bootstrap';
 
 const client = new MarketServiceClient('', { fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args) });
 const stockBreaker = createCircuitBreaker<ListMarketQuotesResponse>({ name: 'Market Quotes', cacheTtlMs: 0 });
-const commodityBreaker = createCircuitBreaker<ListMarketQuotesResponse>({ name: 'Commodity Quotes', cacheTtlMs: 0 });
+const commodityBreaker = createCircuitBreaker<ListCommodityQuotesResponse>({ name: 'Commodity Quotes', cacheTtlMs: 0 });
 const cryptoBreaker = createCircuitBreaker<ListCryptoQuotesResponse>({ name: 'Crypto Quotes' });
 
 const emptyStockFallback: ListMarketQuotesResponse = { quotes: [], finnhubSkipped: false, skipReason: '', rateLimited: false };
@@ -72,14 +73,13 @@ function symbolSetKey(symbols: string[]): string {
 
 export async function fetchMultipleStocks(
   symbols: Array<{ symbol: string; name: string; display: string }>,
-  options: { onBatch?: (results: MarketData[]) => void; useCommodityBreaker?: boolean } = {},
+  options: { onBatch?: (results: MarketData[]) => void } = {},
 ): Promise<MarketFetchResult> {
   const allSymbolStrings = symbols.map((s) => s.symbol);
   const setKey = symbolSetKey(allSymbolStrings);
   const symbolMetaMap = new Map(symbols.map((s) => [s.symbol, s]));
 
-  const breaker = options.useCommodityBreaker ? commodityBreaker : stockBreaker;
-  const resp = await breaker.execute(async () => {
+  const resp = await stockBreaker.execute(async () => {
     return client.listMarketQuotes({ symbols: allSymbolStrings });
   }, emptyStockFallback);
 
@@ -104,6 +104,41 @@ export async function fetchMultipleStocks(
     reason: resp.skipReason || undefined,
     rateLimited: resp.rateLimited || undefined,
   };
+}
+
+// ========================================================================
+// Commodities -- uses listCommodityQuotes (Yahoo → FRED → EIA fallback chain)
+// ========================================================================
+
+const emptyCommodityFallback = { quotes: [] };
+const lastSuccessfulCommodities = new Map<string, MarketData[]>();
+
+export async function fetchCommodities(
+  symbols: Array<{ symbol: string; name: string; display: string }>,
+): Promise<MarketFetchResult> {
+  const allSymbolStrings = symbols.map((s) => s.symbol);
+  const setKey = symbolSetKey(allSymbolStrings);
+  const symbolMetaMap = new Map(symbols.map((s) => [s.symbol, s]));
+
+  const resp = await commodityBreaker.execute(async () => {
+    return client.listCommodityQuotes({ symbols: allSymbolStrings });
+  }, emptyCommodityFallback);
+
+  const results = resp.quotes.map((q) => {
+    const meta = symbolMetaMap.get(q.symbol);
+    return {
+      symbol: q.symbol,
+      name: meta?.name || q.name,
+      display: meta?.display || q.display || q.symbol,
+      price: q.price != null ? q.price : null,
+      change: q.change ?? null,
+      sparkline: q.sparkline?.length > 0 ? q.sparkline : undefined,
+    } as MarketData;
+  });
+
+  if (results.length > 0) lastSuccessfulCommodities.set(setKey, results);
+
+  return { data: results.length > 0 ? results : (lastSuccessfulCommodities.get(setKey) || []) };
 }
 
 export async function fetchStockQuote(

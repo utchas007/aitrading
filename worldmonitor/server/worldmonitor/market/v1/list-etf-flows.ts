@@ -1,6 +1,9 @@
 /**
  * RPC: ListEtfFlows
  * Estimates BTC spot ETF flow direction from Yahoo Finance volume/price data.
+ *
+ * Fallback chain:
+ *   Yahoo Finance (5d chart, volume + price) → Finnhub (quote only, no volume/sparkline)
  */
 
 import type {
@@ -9,7 +12,7 @@ import type {
   ListEtfFlowsResponse,
   EtfFlow,
 } from '../../../../src/generated/server/worldmonitor/market/v1/service_server';
-import { UPSTREAM_TIMEOUT_MS, type YahooChartResponse } from './_shared';
+import { UPSTREAM_TIMEOUT_MS, fetchFinnhubQuote, type YahooChartResponse } from './_shared';
 import { CHROME_UA, yahooGate } from '../../../_shared/constants';
 import { cachedFetchJson, getCachedJson } from '../../../_shared/redis';
 
@@ -55,6 +58,38 @@ async function fetchEtfChart(ticker: string): Promise<YahooChartResponse | null>
     });
     if (!resp.ok) return null;
     return (await resp.json()) as YahooChartResponse;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Finnhub fallback — returns a minimal EtfFlow when Yahoo is unavailable.
+ * Volume/sparkline won't be available but price + change direction still works.
+ */
+async function fetchEtfFromFinnhub(
+  ticker: string,
+  issuer: string,
+): Promise<EtfFlow | null> {
+  const apiKey = process.env.FINNHUB_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const result = await fetchFinnhubQuote(ticker, apiKey);
+    if (!result) return null;
+    const direction = result.changePercent > 0.1 ? 'inflow' : result.changePercent < -0.1 ? 'outflow' : 'neutral';
+    return {
+      ticker,
+      issuer,
+      price: +result.price.toFixed(2),
+      priceChange: +result.changePercent.toFixed(2),
+      // Volume not available from Finnhub quote endpoint — set to 0
+      volume: 0,
+      avgVolume: 0,
+      volumeRatio: 0,
+      direction,
+      // Flow estimate not reliable without volume — set to 0
+      estFlow: 0,
+    };
   } catch {
     return null;
   }
@@ -135,16 +170,40 @@ export async function listEtfFlows(
   try {
   const result = await cachedFetchJson<ListEtfFlowsResponse>(REDIS_CACHE_KEY, REDIS_CACHE_TTL, async () => {
     const etfs: EtfFlow[] = [];
+    const yahooMissed: typeof ETF_LIST = [];
     let misses = 0;
+
+    // ── Layer 1: Yahoo Finance (full data — price, volume, sparkline) ────────
     for (const etf of ETF_LIST) {
       const chart = await fetchEtfChart(etf.ticker);
       if (chart) {
         const parsed = parseEtfChartData(chart, etf.ticker, etf.issuer);
-        if (parsed) etfs.push(parsed); else misses++;
+        if (parsed) {
+          etfs.push(parsed);
+        } else {
+          misses++;
+          yahooMissed.push(etf);
+        }
       } else {
         misses++;
+        yahooMissed.push(etf);
       }
       if (misses >= 3 && etfs.length === 0) break;
+    }
+
+    // ── Layer 2: Finnhub fallback for any ETF Yahoo missed ────────────────
+    // Finnhub provides price + change but not volume — flow estimates are
+    // set to 0, but users still see price direction for each ETF.
+    if (yahooMissed.length > 0 && process.env.FINNHUB_API_KEY) {
+      const finnhubResults = await Promise.all(
+        yahooMissed.map(etf => fetchEtfFromFinnhub(etf.ticker, etf.issuer)),
+      );
+      for (const result of finnhubResults) {
+        if (result) {
+          console.info(`[ETF] ${result.ticker} filled from Finnhub`);
+          etfs.push(result);
+        }
+      }
     }
 
     // If Yahoo rate-limited all calls, return null — outer handler serves stale

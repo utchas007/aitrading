@@ -18,6 +18,7 @@ import {
   fetchCategoryFeeds,
   getFeedFailures,
   fetchMultipleStocks,
+  fetchCommodities,
   fetchCrypto,
   fetchPredictions, type PredictionMarket,
   fetchEarthquakes,
@@ -1025,10 +1026,7 @@ export class DataLoaderManager implements AppModule {
 
       const finnhubConfigMsg = 'FINNHUB_API_KEY not configured — add in Settings';
 
-      if (stocksResult.rateLimited && stocksResult.data.length === 0) {
-        const rlMsg = 'Market data temporarily unavailable (rate limited) — retrying shortly';
-        this.ctx.panels['commodities']?.showError(rlMsg);
-      } else if (stocksResult.skipped) {
+      if (stocksResult.skipped) {
         this.ctx.statusPanel?.updateApi('Finnhub', { status: 'error' });
         if (stocksResult.data.length === 0) {
           this.ctx.panels['markets']?.showConfigError(finnhubConfigMsg);
@@ -1065,7 +1063,7 @@ export class DataLoaderManager implements AppModule {
 
       // Hydrate commodities from bootstrap (same pattern as sectors/markets)
       const hydratedCommodities = getHydratedData('commodityQuotes') as ListMarketQuotesResponse | undefined;
-      let commoditiesLoaded = stocksResult.rateLimited && stocksResult.data.length === 0;
+      let commoditiesLoaded = false;
 
       if (!commoditiesLoaded && hydratedCommodities?.quotes?.length) {
         const symbolMetaMap = new Map(COMMODITIES.map((s) => [s.symbol, s]));
@@ -1089,10 +1087,7 @@ export class DataLoaderManager implements AppModule {
           commoditiesPanel.showRetrying();
           await new Promise(r => setTimeout(r, 20_000));
         }
-        const commoditiesResult = await fetchMultipleStocks(COMMODITIES, {
-          onBatch: (partial) => commoditiesPanel.renderCommodities(partial.map(mapCommodity)),
-          useCommodityBreaker: true,
-        });
+        const commoditiesResult = await fetchCommodities(COMMODITIES);
         const mapped = commoditiesResult.data.map(mapCommodity);
         if (mapped.some(d => d.price !== null)) {
           commoditiesPanel.renderCommodities(mapped);
