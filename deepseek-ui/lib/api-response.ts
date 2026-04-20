@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 export type ErrorCode =
   | 'VALIDATION_ERROR'
+  | 'UNAUTHORIZED'
   | 'NOT_FOUND'
   | 'CONFLICT'
   | 'IB_ERROR'

@@ -54,7 +54,7 @@
 |---|---|---|---|
 | **Next.js Dashboard** | Next.js 15, React 19 | 3001 | Trading UI, API routes |
 | **WebSocket Server** | Node.js, Socket.IO | 3002 | Real-time price/status broadcasts |
-| **Standalone Bot** | Node.js, tsx | 3002 | Persistent trading engine (optional) |
+| **Standalone Bot** | Node.js, tsx | 3003 | Persistent trading engine (optional) |
 | **IB Service** | Python, FastAPI | 8765 | Interactive Brokers REST wrapper |
 | **PostgreSQL** | PostgreSQL 16 | 5432 | Trade records, signals, activity log |
 | **Ollama** | Go, LLM | 11434 | Local AI sentiment analysis |

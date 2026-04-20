@@ -33,7 +33,7 @@ export const TIMEOUTS = {
 
   /**
    * Very short probe used only to check whether the standalone trading-bot
-   * process is alive on port 3002.  If it doesn't respond in 300 ms it is
+   * process is alive (default: port 3003). If it doesn't respond in 300 ms it is
    * not ready and we fall back to the in-process engine.
    */
   BOT_PROBE_MS: 300,

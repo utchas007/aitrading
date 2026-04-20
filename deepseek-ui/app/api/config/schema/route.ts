@@ -119,6 +119,16 @@ const CONFIG_SCHEMA: Array<{
     description: 'WebSocket server port',
   },
   {
+    key: 'BOT_PORT',
+    default: '3003',
+    description: 'Standalone trading bot control/status port',
+  },
+  {
+    key: 'BOT_URL',
+    default: 'http://localhost:3003',
+    description: 'Optional explicit URL override for the standalone trading bot',
+  },
+  {
     key: 'WS_CORS_ORIGINS',
     default: 'http://localhost:3001,http://localhost:3000',
     description: 'Comma-separated list of allowed CORS origins for the WebSocket server',

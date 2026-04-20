@@ -13,7 +13,8 @@ const log = createLogger('api/trading/engine');
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const BOT_URL = 'http://localhost:3002';
+const BOT_PORT = process.env.BOT_PORT ?? '3003';
+const BOT_URL = process.env.BOT_URL ?? `http://localhost:${BOT_PORT}`;
 
 // Try standalone bot first, fall back to in-process engine
 async function tryStandaloneBot(path: string, options?: RequestInit): Promise<Response | null> {
@@ -100,7 +101,7 @@ export async function POST(req: NextRequest) {
       // Refuse to start in-process if standalone bot is alive — prevents duplicate instances
       const standaloneAlive = await tryStandaloneBot('/status');
       if (standaloneAlive?.ok) {
-        return apiError('Standalone bot is already running on port 3002. Stop it first.', 'CONFLICT', { status: 409 });
+        return apiError(`Standalone bot is already running at ${BOT_URL}. Stop it first.`, 'CONFLICT', { status: 409 });
       }
 
       if (engineInstance?.getStatus().isRunning) {

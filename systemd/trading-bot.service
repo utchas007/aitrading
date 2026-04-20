@@ -1,5 +1,5 @@
 [Unit]
-Description=Trading Bot — Standalone Bot Process (Port 3002)
+Description=Trading Bot — Standalone Bot Process (Port 3003)
 Documentation=file:///home/aiserver/Trading Project/STARTUP_GUIDE.md
 After=network.target nextjs.service
 Wants=nextjs.service
@@ -12,6 +12,7 @@ WorkingDirectory=/home/aiserver/Trading Project/deepseek-ui
 
 EnvironmentFile=-/home/aiserver/Trading Project/deepseek-ui/.env.local
 Environment="NODE_ENV=production"
+Environment="BOT_PORT=3003"
 Environment="PATH=/home/aiserver/.nvm/versions/node/v24.14.1/bin:/usr/bin:/usr/local/bin"
 
 ExecStart=/home/aiserver/.nvm/versions/node/v24.14.1/bin/npx tsx scripts/trading-bot.ts

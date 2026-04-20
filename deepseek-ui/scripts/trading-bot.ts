@@ -31,7 +31,7 @@ const CONFIG = {
   maxDailyTrades: 30,
 };
 
-const PORT = 3002;
+const PORT = parseInt(process.env.BOT_PORT ?? '3003', 10);
 
 let engine = createTradingEngine(CONFIG);
 
