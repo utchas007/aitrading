@@ -16,9 +16,12 @@ import {
 } from './_shared';
 import { CHROME_UA } from '../../../_shared/constants';
 
-const CACHE_KEY = 'theater-posture:sebuf:v1';
-const STALE_CACHE_KEY = 'theater-posture:sebuf:stale:v1';
-const BACKUP_CACHE_KEY = 'theater-posture:sebuf:backup:v1';
+const CACHE_KEY = 'theater_posture:sebuf:v1';
+const STALE_CACHE_KEY = 'theater_posture:sebuf:stale:v1';
+const BACKUP_CACHE_KEY = 'theater_posture:sebuf:backup:v1';
+const LEGACY_CACHE_KEY = 'theater-posture:sebuf:v1';
+const LEGACY_STALE_CACHE_KEY = 'theater-posture:sebuf:stale:v1';
+const LEGACY_BACKUP_CACHE_KEY = 'theater-posture:sebuf:backup:v1';
 const CACHE_TTL = 900; // 15 minutes
 const STALE_TTL = 86400;
 const BACKUP_TTL = 604800;
@@ -264,9 +267,13 @@ export async function getTheaterPosture(
     if (result) return result;
   } catch { /* upstream failed — fall through to stale/backup */ }
 
-  const stale = (await getCachedJson(STALE_CACHE_KEY)) as GetTheaterPostureResponse | null;
+  const stale = (await getCachedJson(STALE_CACHE_KEY)) as GetTheaterPostureResponse | null
+    ?? (await getCachedJson(LEGACY_STALE_CACHE_KEY)) as GetTheaterPostureResponse | null;
   if (stale) return stale;
-  const backup = (await getCachedJson(BACKUP_CACHE_KEY)) as GetTheaterPostureResponse | null;
+  const backup = (await getCachedJson(BACKUP_CACHE_KEY)) as GetTheaterPostureResponse | null
+    ?? (await getCachedJson(LEGACY_BACKUP_CACHE_KEY)) as GetTheaterPostureResponse | null;
   if (backup) return backup;
+  const legacyFresh = (await getCachedJson(LEGACY_CACHE_KEY)) as GetTheaterPostureResponse | null;
+  if (legacyFresh) return legacyFresh;
   return { theaters: [] };
 }

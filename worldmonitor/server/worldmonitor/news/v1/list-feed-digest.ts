@@ -33,6 +33,8 @@ function getRelayHeaders(): Record<string, string> {
 }
 
 const VALID_VARIANTS = new Set(['full', 'tech', 'finance', 'happy', 'commodity']);
+// Bootstrap key registry alias for pre-hydrated insights payloads.
+export const NEWS_INSIGHTS_BOOTSTRAP_KEY = 'news:insights:v1';
 const fallbackDigestCache = new Map<string, { data: ListFeedDigestResponse; ts: number }>();
 const ITEMS_PER_FEED = 5;
 const MAX_ITEMS_PER_CATEGORY = 20;

@@ -15,6 +15,13 @@ import { cachedFetchJson } from '../../../_shared/redis';
 
 const REDIS_CACHE_KEY = 'economic:worldbank:v1';
 const REDIS_CACHE_TTL = 86400; // 24 hr — annual data
+// Bootstrap key registry uses these stable keys for pre-hydrated dashboard panels.
+// They are seeded out-of-band but documented here to keep handler/cache mapping explicit.
+export const WORLD_BANK_BOOTSTRAP_KEYS = {
+  techReadiness: 'economic:worldbank-techreadiness:v1',
+  progressData: 'economic:worldbank-progress:v1',
+  renewableEnergy: 'economic:worldbank-renewable:v1',
+} as const;
 
 const TECH_COUNTRIES = [
   'USA', 'CHN', 'JPN', 'DEU', 'KOR', 'GBR', 'IND', 'ISR', 'SGP', 'TWN',

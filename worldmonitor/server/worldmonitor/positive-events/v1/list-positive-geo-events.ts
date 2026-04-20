@@ -6,7 +6,7 @@ import type {
 } from '../../../../src/generated/server/worldmonitor/positive_events/v1/service_server';
 import { getCachedJson } from '../../../_shared/redis';
 
-const CACHE_KEY = 'positive-events:geo:v1';
+const CACHE_KEY = 'positive_events:geo:v1';
 const MAX_AGE_MS = 25 * 60 * 60 * 1000;
 
 let fallback: { events: PositiveGeoEvent[]; ts: number } | null = null;
