@@ -23,13 +23,13 @@ function redisCacheKey(symbols: string[]): string {
 }
 
 // ── FRED series IDs for each Yahoo commodity symbol ───────────────────────────
+// Note: Gold (GOLDPMGBD228NLBM) and Silver (SLVPRUSD) FRED series are discontinued —
+// those symbols rely on Yahoo Finance only.
 const FRED_SERIES: Record<string, { seriesId: string; name: string; display: string }> = {
-  'GC=F': { seriesId: 'GOLDPMGBD228NLBM', name: 'Gold',        display: 'Gold'        },
-  'SI=F': { seriesId: 'SLVPRUSD',         name: 'Silver',      display: 'Silver'      },
-  'CL=F': { seriesId: 'DCOILWTICO',       name: 'WTI Crude',   display: 'WTI Oil'     },
-  'BZ=F': { seriesId: 'DCOILBRENTEU',     name: 'Brent Crude', display: 'Brent'       },
-  'NG=F': { seriesId: 'MHHNGSP',          name: 'Natural Gas', display: 'Nat Gas'     },
-  'HG=F': { seriesId: 'PCOPPUSDM',        name: 'Copper',      display: 'Copper'      },
+  'CL=F': { seriesId: 'DCOILWTICO',   name: 'WTI Crude',   display: 'WTI Oil' },
+  'BZ=F': { seriesId: 'DCOILBRENTEU', name: 'Brent Crude', display: 'Brent'   },
+  'NG=F': { seriesId: 'MHHNGSP',      name: 'Natural Gas', display: 'Nat Gas' },
+  'HG=F': { seriesId: 'PCOPPUSDM',    name: 'Copper',      display: 'Copper'  },
 };
 
 // ── EIA series IDs (energy only, more real-time than FRED) ───────────────────
@@ -61,8 +61,11 @@ async function fetchFredQuote(symbol: string): Promise<CommodityQuote | null> {
     const obs = data.observations?.filter(o => o.value !== '.') ?? [];
     if (obs.length < 1) return null;
 
-    const price  = parseFloat(obs[0].value);
-    const prev   = obs.length > 1 ? parseFloat(obs[1].value) : price;
+    const latestObs = obs[0];
+    if (!latestObs) return null;
+    const price  = parseFloat(latestObs.value);
+    const prevObs = obs.length > 1 ? obs[1] : latestObs;
+    const prev   = prevObs ? parseFloat(prevObs.value) : price;
     const change = price && prev ? ((price - prev) / prev) * 100 : 0;
 
     return { symbol, name: meta.name, display: meta.display, price, change, sparkline: [] };
@@ -95,8 +98,11 @@ async function fetchEiaQuote(symbol: string): Promise<CommodityQuote | null> {
     const rows = data?.response?.data ?? [];
     if (!rows.length) return null;
 
-    const price  = rows[0].value;
-    const prev   = rows.length > 1 ? rows[1].value : price;
+    const latestRow = rows[0];
+    if (!latestRow) return null;
+    const price  = latestRow.value;
+    const prevRow = rows.length > 1 ? rows[1] : latestRow;
+    const prev   = prevRow ? prevRow.value : price;
     const change = price && prev ? ((price - prev) / prev) * 100 : 0;
 
     return { symbol, name: meta.name, display: meta.display, price, change, sparkline: [] };
@@ -145,12 +151,13 @@ export async function listCommodityQuotes(
         const fredResults = await Promise.allSettled(missing.map(s => fetchFredQuote(s)));
         const eiaSymbols: string[] = [];
 
-        for (let i = 0; i < missing.length; i++) {
-          const r = fredResults[i];
+        for (const [i, r] of fredResults.entries()) {
+          const symbol = missing[i];
+          if (!symbol) continue;
           if (r.status === 'fulfilled' && r.value) {
             quotes.push(r.value);
           } else {
-            eiaSymbols.push(missing[i]);
+            eiaSymbols.push(symbol);
           }
         }
 
