@@ -10,6 +10,10 @@ export const dynamic = 'force-dynamic';
 
 const WORLDMONITOR_BASE_URL = process.env.WORLDMONITOR_URL || 'http://localhost:3000';
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * Proxy endpoint to fetch World Monitor Finance data
  * This integrates stock indices, commodities, forex, and crypto data into the trading bot
@@ -41,6 +45,7 @@ export async function GET(req: NextRequest) {
       success: true,
       timestamp: new Date().toISOString(),
       worldmonitor_url: `${WORLDMONITOR_BASE_URL}/?variant=finance`,
+      category,
       message: 'World Monitor Finance is accessible. Embed the URL in an iframe for real-time data.',
       available_data: {
         stock_indices: ['S&P 500', 'Dow Jones', 'NASDAQ', 'FTSE', 'DAX', 'Nikkei'],
@@ -49,9 +54,10 @@ export async function GET(req: NextRequest) {
         crypto: ['BTC', 'ETH', 'Real-time prices from multiple exchanges'],
       },
     });
-  } catch (error: any) {
-    log.error('World Monitor finance fetch error', { error: error.message });
-    return apiError(error.message, 'SERVICE_UNAVAILABLE', {
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    log.error('World Monitor finance fetch error', { error: message });
+    return apiError(message, 'SERVICE_UNAVAILABLE', {
       extra: { note: 'World Monitor may not be running on port 3000. Start it with: bash /home/aiminer2/start-worldmonitor-local.sh' },
     });
   }

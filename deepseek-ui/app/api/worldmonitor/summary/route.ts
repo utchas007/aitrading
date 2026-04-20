@@ -9,6 +9,10 @@ const log = createLogger('api/worldmonitor/summary');
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * GET /api/worldmonitor/summary
  * Returns complete World Monitor data summary for trading analysis
@@ -24,9 +28,10 @@ export async function GET(req: NextRequest) {
         ...summary,
         aiContext,
       });
-    } catch (error: any) {
-      log.error('World Monitor summary error', { error: error.message });
-      return apiError(error.message, 'EXTERNAL_API_ERROR');
+    } catch (error: unknown) {
+      const message = getErrorMessage(error);
+      log.error('World Monitor summary error', { error: message });
+      return apiError(message, 'EXTERNAL_API_ERROR');
     }
   });
 }

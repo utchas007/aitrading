@@ -7,6 +7,10 @@ const log = createLogger('api/worldmonitor/news');
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 interface NewsItem {
   title: string;
   description: string;
@@ -137,8 +141,8 @@ export async function GET(req: NextRequest) {
 
     // If all feeds failed, use fallback
     throw new Error('All RSS feeds failed');
-  } catch (error: any) {
-    log.warn('RSS feeds unavailable, using mock financial news');
+  } catch (error: unknown) {
+    log.warn('RSS feeds unavailable, using mock financial news', { error: getErrorMessage(error) });
     
     // Return mock data if worldmonitor is unavailable
     const mockNews: NewsItem[] = [

@@ -8,8 +8,9 @@ import CryptoSelector from "@/components/crypto-selector";
 import StockSelector from "@/components/stock-selector";
 import NotificationBell from "@/components/notification-bell";
 import { WorldMonitorPanel } from "@/components/worldmonitor-panel";
+import PnLAnalytics from "@/components/pnl-analytics";
 
-type View = 'chat' | 'trading' | 'crypto' | 'stocks' | 'worldmonitor';
+type View = 'chat' | 'trading' | 'crypto' | 'stocks' | 'worldmonitor' | 'analytics';
 
 const NAV_ITEMS: { id: View; label: string }[] = [
   { id: 'chat',         label: '💬 AI Chat' },
@@ -17,6 +18,7 @@ const NAV_ITEMS: { id: View; label: string }[] = [
   { id: 'crypto',       label: '🪙 Crypto' },
   { id: 'stocks',       label: '🏦 Stocks' },
   { id: 'worldmonitor', label: '🌍 World Monitor' },
+  { id: 'analytics',   label: '📊 Analytics' },
 ];
 
 export default function Home() {
@@ -138,6 +140,7 @@ export default function Home() {
           <div style={{ display: view === 'crypto'       ? 'block' : 'none' }}><CryptoSelector /></div>
           <div style={{ display: view === 'stocks'       ? 'block' : 'none' }}><StockSelector /></div>
           <div style={{ display: view === 'worldmonitor' ? 'block' : 'none' }}><WorldMonitorPanel /></div>
+          <div style={{ display: view === 'analytics'   ? 'block' : 'none' }}><PnLAnalytics /></div>
         </div>
 
         {/* Activity Feed Sidebar */}

@@ -34,6 +34,10 @@ let engineRecoveryAttempted = false;
 // (race condition if the UI sends two rapid start requests)
 let engineStartMutex = false;
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // Auto-recover bot if it was running before server restart
 async function recoverBotIfNeeded() {
   if (engineRecoveryAttempted) return;
@@ -139,8 +143,8 @@ export async function POST(req: NextRequest) {
       // Persist state to database
       try {
         await setBotRunning(botConfig);
-      } catch (e) {
-        log.error('setBotRunning failed', { error: String(e) });
+      } catch (error: unknown) {
+        log.error('setBotRunning failed', { error: getErrorMessage(error) });
       }
 
       return NextResponse.json({
@@ -159,8 +163,8 @@ export async function POST(req: NextRequest) {
       // Persist state to database
       try {
         await setBotStopped();
-      } catch (e) {
-        log.error('setBotStopped failed', { error: String(e) });
+      } catch (error: unknown) {
+        log.error('setBotStopped failed', { error: getErrorMessage(error) });
       }
       
       // Return stopped status so UI can immediately update
@@ -176,9 +180,10 @@ export async function POST(req: NextRequest) {
     }
 
     return apiError('Invalid action', 'VALIDATION_ERROR', { status: 400 });
-  } catch (error: any) {
-    log.error('Engine control error', { error: error.message });
-    return apiError(error.message, 'INTERNAL_ERROR');
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    log.error('Engine control error', { error: message });
+    return apiError(message, 'INTERNAL_ERROR');
   }
   });
 }
@@ -224,9 +229,10 @@ export async function GET(req: NextRequest) {
       status,
       activities: activities.slice(0, 50),
     });
-  } catch (error: any) {
-    log.error('Engine status error', { error: error.message });
-    return apiError(error.message, 'INTERNAL_ERROR');
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    log.error('Engine status error', { error: message });
+    return apiError(message, 'INTERNAL_ERROR');
   }
   });
 }

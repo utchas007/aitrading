@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
     if (wmCheck.ok) {
       status.connected = true;
     }
-  } catch (e) {
+  } catch {
     status.error = 'World Monitor not reachable';
   }
 

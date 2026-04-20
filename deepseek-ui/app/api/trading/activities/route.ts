@@ -19,6 +19,10 @@ export const dynamic = 'force-dynamic';
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT     = 200;
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export async function GET(req: NextRequest) {
   return withCorrelation(req, async () => {
     try {
@@ -64,9 +68,10 @@ export async function GET(req: NextRequest) {
           hasPrevPage: page > 1,
         },
       });
-    } catch (error: any) {
-      log.error('Activities query failed', { error: error.message });
-      return apiError(error.message, 'DB_ERROR');
+    } catch (error: unknown) {
+      const message = getErrorMessage(error);
+      log.error('Activities query failed', { error: message });
+      return apiError(message, 'DB_ERROR');
     }
   });
 }

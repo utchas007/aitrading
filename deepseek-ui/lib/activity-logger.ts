@@ -13,6 +13,20 @@ const ACTIVITY_RETENTION_DAYS = parseInt(process.env.ACTIVITY_LOG_RETENTION_DAYS
 
 /** Retention period for Notification rows (default: 90 days). */
 const NOTIFICATION_RETENTION_DAYS = parseInt(process.env.NOTIFICATION_RETENTION_DAYS ?? '90', 10);
+const RETENTION_CLEANUP_ENABLED = process.env.NODE_ENV !== 'test'
+  && process.env.DISABLE_ACTIVITY_RETENTION_CLEANUP !== '1';
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+interface ActivityLogRow {
+  id: string | number;
+  createdAt: Date;
+  type: string;
+  message: string;
+  pair: string | null;
+}
 
 /**
  * Run cleanup once at startup and then every 24 hours.
@@ -42,8 +56,8 @@ async function startRetentionCleanup(): Promise<void> {
       if (notificationResult.count > 0) {
         log.info(`Notification retention: deleted ${notificationResult.count} rows older than ${NOTIFICATION_RETENTION_DAYS} days`);
       }
-    } catch (e: any) {
-      log.warn('Retention cleanup failed', { error: e?.message ?? String(e) });
+    } catch (error: unknown) {
+      log.warn('Retention cleanup failed', { error: getErrorMessage(error) });
     }
   };
 
@@ -53,7 +67,9 @@ async function startRetentionCleanup(): Promise<void> {
 }
 
 // Kick off cleanup in background — never blocks the logger init
-void startRetentionCleanup();
+if (RETENTION_CLEANUP_ENABLED) {
+  void startRetentionCleanup();
+}
 
 // Async DB write — fire and forget, never blocks the bot
 async function persistToDb(type: string, message: string, pair?: string): Promise<void> {
@@ -77,7 +93,7 @@ async function loadFromDb(limit: number = 50): Promise<Activity[]> {
       take: limit,
       select: { id: true, createdAt: true, type: true, message: true, pair: true },
     });
-    return dbActivities.map((a: any) => ({
+    return dbActivities.map((a: ActivityLogRow) => ({
       id: String(a.id),
       timestamp: new Date(a.createdAt).getTime(),
       type: a.type as ActivityType,

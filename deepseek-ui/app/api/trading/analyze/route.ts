@@ -10,32 +10,8 @@ const log = createLogger('api/trading/analyze');
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-interface AnalysisRequest {
-  news: Array<{
-    title: string;
-    description: string;
-    source: string;
-    pubDate: string;
-  }>;
-  marketData: {
-    [pair: string]: {
-      price: string;
-      volume: string;
-      change24h?: string;
-    };
-  };
-  pair: string; // Trading pair or stock symbol to analyze (e.g., 'XXBTZUSD' or 'AAPL')
-  assetType?: 'crypto' | 'stock'; // Optional: defaults to 'crypto' for backward compat
-  technicals?: {
-    rsi?: number;
-    rsiSignal?: string;
-    macd?: string;
-    overallSignal?: string;
-    confidence?: number;
-    price?: number;
-    change?: string;
-  };
-  worldContext?: string; // Global market context from World Monitor (commodities, geopolitics, indices)
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export async function POST(req: NextRequest) {
@@ -194,9 +170,10 @@ Format your response as JSON with these fields:
       pair,
       timestamp: new Date().toISOString(),
     });
-  } catch (error: any) {
-    log.error('Trading analysis error', { error: error.message });
-    return apiError(error.message || 'Failed to analyze trading data', 'INTERNAL_ERROR');
+  } catch (error: unknown) {
+    const message = getErrorMessage(error) || 'Failed to analyze trading data';
+    log.error('Trading analysis error', { error: message });
+    return apiError(message, 'INTERNAL_ERROR');
   }
   });
 }
