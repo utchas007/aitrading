@@ -18,7 +18,6 @@ const NAV_ITEMS: { id: View; label: string }[] = [
   { id: 'crypto',       label: '🪙 Crypto' },
   { id: 'stocks',       label: '🏦 Stocks' },
   { id: 'worldmonitor', label: '🌍 World Monitor' },
-  { id: 'analytics',   label: '📊 Analytics' },
 ];
 
 export default function Home() {
@@ -59,14 +58,17 @@ export default function Home() {
         @media (max-width: 1200px) {
           .activity-sidebar { width: 320px !important; }
         }
+        @media (max-width: 1500px) {
+          .market-indicator { display: none !important; }
+        }
         @media (max-width: 900px) {
           .activity-sidebar { width: 280px !important; }
           .nav-btn { padding: 6px 10px !important; font-size: 11px !important; }
-          .market-indicator { font-size: 11px !important; }
+          .market-indicator { display: none !important; }
         }
         @media (max-width: 768px) {
           .activity-sidebar { display: none !important; }
-          .header-bar { flex-wrap: wrap; gap: 8px; padding: 8px 12px !important; }
+          .header-bar { gap: 8px; padding: 8px 12px !important; }
           .nav-btn { padding: 6px 8px !important; }
         }
       `}</style>
@@ -83,7 +85,7 @@ export default function Home() {
         justifyContent: 'space-between',
         alignItems: 'center',
         backdropFilter: 'blur(10px)',
-        flexWrap: 'wrap',
+        flexWrap: 'nowrap',
         gap: 12,
       }}>
         {/* Left: Market Indicators */}
@@ -104,8 +106,35 @@ export default function Home() {
         </div>
 
         {/* Right: Navigation + Notifications */}
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+          overflowX: 'auto',
+          scrollbarWidth: 'thin',
+          maxWidth: '100%',
+        }}>
           <NotificationBell />
+          <button
+            className="nav-btn"
+            onClick={() => setView('analytics')}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 8,
+              border: '1px solid',
+              borderColor: view === 'analytics' ? '#00ff9f' : '#2a2a4a',
+              background: view === 'analytics' ? '#00ff9f22' : 'transparent',
+              color: view === 'analytics' ? '#00ff9f' : '#888',
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 600,
+              transition: 'all 0.2s',
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+            }}
+          >
+            📊 Analytics
+          </button>
           {NAV_ITEMS.map(({ id, label }) => (
             <button
               key={id}
@@ -123,6 +152,7 @@ export default function Home() {
                 fontWeight: 600,
                 transition: 'all 0.2s',
                 whiteSpace: 'nowrap',
+                flexShrink: 0,
               }}
             >
               {label}

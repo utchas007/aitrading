@@ -198,6 +198,8 @@ export default function PnLAnalytics() {
   }
 
   const s = data?.summary;
+  const isFlatDataset = !!data && data.cumulativeSeries.length > 0 &&
+    data.cumulativeSeries.every(p => p.cumulativePnl === 0 && p.tradePnl === 0);
   const periodData: BucketPoint[] = data
     ? (gran === 'daily'   ? data.dailyBreakdown
      : gran === 'weekly'  ? data.weeklyBreakdown
@@ -234,6 +236,20 @@ export default function PnLAnalytics() {
         <div style={{ textAlign: 'center', color: '#666', paddingTop: 80, fontSize: 14 }}>Loading analytics…</div>
       ) : !data ? null : (
         <>
+          {isFlatDataset && (
+            <div style={{
+              marginBottom: 16,
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: `1px solid ${BORDER}`,
+              background: '#0a0a14',
+              color: DIM,
+              fontSize: 12,
+            }}>
+              Analytics is loading correctly. Current period has closed trades, but all realized P&L values are 0.00, so charts appear flat.
+            </div>
+          )}
+
           {/* ── Summary Cards ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 28 }}>
             <StatCard
@@ -306,6 +322,10 @@ export default function PnLAnalytics() {
             {data.cumulativeSeries.length === 0 ? (
               <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666', fontSize: 13 }}>
                 No closed trades in this period
+              </div>
+            ) : isFlatDataset ? (
+              <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666', fontSize: 13 }}>
+                Flat P&L series (all trades closed at 0.00 realized P&L)
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={220}>

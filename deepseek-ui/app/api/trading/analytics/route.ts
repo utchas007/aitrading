@@ -30,6 +30,60 @@ function monthKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+function round2(n: number): number {
+  return +n.toFixed(2);
+}
+
+type ClosedTrade = {
+  id: number;
+  pair: string;
+  type: string;
+  pnl: number | null;
+  pnlPercent: number | null;
+  entryPrice: number;
+  exitPrice: number | null;
+  volume: number;
+  stopLoss: number;
+  takeProfit: number;
+  expectedProfitUSD: number | null;
+  expectedLossUSD: number | null;
+  createdAt: Date;
+  closedAt: Date | null;
+  closeReason: string | null;
+};
+
+function derivePnlFromPrices(t: ClosedTrade): number | null {
+  if (t.exitPrice == null || !Number.isFinite(t.entryPrice) || !Number.isFinite(t.volume) || t.volume <= 0) {
+    return null;
+  }
+  if (t.type === 'buy')  return (t.exitPrice - t.entryPrice) * t.volume;
+  if (t.type === 'sell') return (t.entryPrice - t.exitPrice) * t.volume;
+  return null;
+}
+
+function deriveFallbackPnl(t: ClosedTrade): number | null {
+  // If explicit pnl is present and non-zero, trust DB value.
+  if (t.pnl != null && Math.abs(t.pnl) > 1e-9) return t.pnl;
+
+  // If we have meaningful fill prices, compute realized pnl directly.
+  const fromPrices = derivePnlFromPrices(t);
+  if (fromPrices != null && Math.abs(fromPrices) > 1e-9) return fromPrices;
+
+  // Last resort: infer from close reason + expected TP/SL outcome.
+  if (t.closeReason === 'take_profit' && t.expectedProfitUSD != null) return Math.abs(t.expectedProfitUSD);
+  if (t.closeReason === 'stop_loss'   && t.expectedLossUSD   != null) return -Math.abs(t.expectedLossUSD);
+
+  // Preserve true break-even scenarios.
+  return t.pnl ?? 0;
+}
+
+function deriveFallbackPnlPercent(t: ClosedTrade, pnl: number): number {
+  if (t.pnlPercent != null && Math.abs(t.pnlPercent) > 1e-9) return t.pnlPercent;
+  const costBasis = t.entryPrice * t.volume;
+  if (!Number.isFinite(costBasis) || costBasis <= 0) return 0;
+  return (pnl / costBasis) * 100;
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -49,6 +103,8 @@ export async function GET(req: NextRequest) {
           id: true, pair: true, type: true,
           pnl: true, pnlPercent: true,
           entryPrice: true, exitPrice: true, volume: true,
+          stopLoss: true, takeProfit: true,
+          expectedProfitUSD: true, expectedLossUSD: true,
           createdAt: true, closedAt: true, closeReason: true,
         },
       }),
@@ -59,15 +115,21 @@ export async function GET(req: NextRequest) {
       prisma.trade.count({ where: { status: 'open' } }),
     ]);
 
-    // --- Summary ---
-    const totalRealized = closedTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const wins   = closedTrades.filter(t => (t.pnl ?? 0) > 0);
-    const losses = closedTrades.filter(t => (t.pnl ?? 0) <= 0);
-    const winRate = closedTrades.length > 0 ? wins.length / closedTrades.length : 0;
-    const avgWin  = wins.length   > 0 ? wins.reduce((s, t)   => s + (t.pnl ?? 0), 0) / wins.length   : 0;
-    const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl ?? 0), 0) / losses.length : 0;
+    const trades = closedTrades.map((t) => {
+      const pnl = deriveFallbackPnl(t as ClosedTrade);
+      const pnlPercent = deriveFallbackPnlPercent(t as ClosedTrade, pnl);
+      return { ...t, _pnl: pnl, _pnlPercent: pnlPercent };
+    });
 
-    const tradesWithDuration = closedTrades.filter(t => t.closedAt);
+    // --- Summary ---
+    const totalRealized = trades.reduce((s, t) => s + t._pnl, 0);
+    const wins   = trades.filter(t => t._pnl > 0);
+    const losses = trades.filter(t => t._pnl <= 0);
+    const winRate = closedTrades.length > 0 ? wins.length / closedTrades.length : 0;
+    const avgWin  = wins.length   > 0 ? wins.reduce((s, t)   => s + t._pnl, 0) / wins.length   : 0;
+    const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + t._pnl, 0) / losses.length : 0;
+
+    const tradesWithDuration = trades.filter(t => t.closedAt);
     const avgHoldMinutes = tradesWithDuration.length > 0
       ? tradesWithDuration.reduce((s, t) => {
           return s + (new Date(t.closedAt!).getTime() - new Date(t.createdAt).getTime()) / 60_000;
@@ -76,12 +138,12 @@ export async function GET(req: NextRequest) {
 
     // --- Cumulative P&L series ---
     let cumPnl = 0;
-    const cumulativeSeries = closedTrades.map(t => {
-      cumPnl += t.pnl ?? 0;
+    const cumulativeSeries = trades.map(t => {
+      cumPnl += t._pnl;
       return {
         date: t.closedAt ? isoDate(new Date(t.closedAt)) : null,
-        cumulativePnl: +cumPnl.toFixed(2),
-        tradePnl: +(t.pnl ?? 0).toFixed(2),
+        cumulativePnl: round2(cumPnl),
+        tradePnl: round2(t._pnl),
         pair: t.pair,
       };
     });
@@ -96,7 +158,7 @@ export async function GET(req: NextRequest) {
     }
 
     // --- Best / worst ---
-    const sorted = [...closedTrades].sort((a, b) => (b.pnl ?? 0) - (a.pnl ?? 0));
+    const sorted = [...trades].sort((a, b) => b._pnl - a._pnl);
     const best  = sorted[0] ?? null;
     const worst = sorted[sorted.length - 1] ?? null;
 
@@ -113,8 +175,8 @@ export async function GET(req: NextRequest) {
     const weekMap: Record<string, Bucket>  = {};
     const monthMap: Record<string, Bucket> = {};
 
-    for (const t of closedTrades) {
-      const pnl = t.pnl ?? 0;
+    for (const t of trades) {
+      const pnl = t._pnl;
       if (!t.closedAt) continue;
       const d = new Date(t.closedAt);
       roll(dayMap,   isoDate(d),  pnl);
@@ -129,7 +191,7 @@ export async function GET(req: NextRequest) {
 
     // --- Per-pair ---
     const pairMap: Record<string, Bucket> = {};
-    for (const t of closedTrades) roll(pairMap, t.pair, t.pnl ?? 0);
+    for (const t of trades) roll(pairMap, t.pair, t._pnl);
     const pairBreakdown = Object.entries(pairMap)
       .sort(([, a], [, b]) => b.pnl - a.pnl)
       .map(([pair, v]) => ({
@@ -140,13 +202,13 @@ export async function GET(req: NextRequest) {
 
     // --- Close reasons ---
     const reasonMap: Record<string, number> = {};
-    for (const t of closedTrades) {
+    for (const t of trades) {
       const r = t.closeReason ?? 'unknown';
       reasonMap[r] = (reasonMap[r] ?? 0) + 1;
     }
 
     // --- Recent trades (last 20) ---
-    const recentTrades = [...closedTrades]
+    const recentTrades = [...trades]
       .sort((a, b) => new Date(b.closedAt ?? 0).getTime() - new Date(a.closedAt ?? 0).getTime())
       .slice(0, 20)
       .map(t => ({
@@ -155,8 +217,8 @@ export async function GET(req: NextRequest) {
         type: t.type,
         entryPrice: t.entryPrice,
         exitPrice: t.exitPrice,
-        pnl: t.pnl != null ? +t.pnl.toFixed(2) : null,
-        pnlPercent: t.pnlPercent != null ? +t.pnlPercent.toFixed(2) : null,
+        pnl: round2(t._pnl),
+        pnlPercent: round2(t._pnlPercent),
         closeReason: t.closeReason,
         closedAt: t.closedAt,
       }));
@@ -167,7 +229,7 @@ export async function GET(req: NextRequest) {
         totalRealized:  +totalRealized.toFixed(2),
         unrealizedPnl:  +(latestSnapshot?.unrealizedPnl ?? 0).toFixed(2),
         portfolioValue: +(latestSnapshot?.totalValue ?? 0).toFixed(2),
-        totalTrades:    closedTrades.length,
+        totalTrades:    trades.length,
         openTrades:     openCount,
         winRate:        +winRate.toFixed(4),
         winCount:       wins.length,
@@ -176,8 +238,8 @@ export async function GET(req: NextRequest) {
         avgLoss:        +avgLoss.toFixed(2),
         avgHoldMinutes: +avgHoldMinutes.toFixed(1),
         maxDrawdown:    +maxDrawdown.toFixed(2),
-        bestTrade:  best  ? { pair: best.pair,  pnl: best.pnl,  pnlPercent: best.pnlPercent  } : null,
-        worstTrade: worst ? { pair: worst.pair, pnl: worst.pnl, pnlPercent: worst.pnlPercent } : null,
+        bestTrade:  best  ? { pair: best.pair,  pnl: round2(best._pnl),  pnlPercent: round2(best._pnlPercent)  } : null,
+        worstTrade: worst ? { pair: worst.pair, pnl: round2(worst._pnl), pnlPercent: round2(worst._pnlPercent) } : null,
         closeReasons: reasonMap,
       },
       cumulativeSeries,
