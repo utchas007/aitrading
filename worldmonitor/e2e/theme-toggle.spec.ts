@@ -9,14 +9,13 @@ import { expect, test } from '@playwright/test';
 
 test.describe('theme toggle (happy variant)', () => {
   test.beforeEach(async ({ page }) => {
-    // Set variant to happy, clear theme preference ONLY on first load
-    // (addInitScript runs on every navigation, so we use a flag)
+    // Force happy + light at boot so this suite is variant-agnostic
+    // even when run under VITE_VARIANT=tech/finance projects.
     await page.addInitScript(() => {
-      if (!sessionStorage.getItem('__test_init_done')) {
-        localStorage.removeItem('worldmonitor-theme');
-        localStorage.removeItem('worldmonitor-variant');
+      if (!sessionStorage.getItem('__theme_suite_init_done')) {
         localStorage.setItem('worldmonitor-variant', 'happy');
-        sessionStorage.setItem('__test_init_done', '1');
+        localStorage.setItem('worldmonitor-theme', 'light');
+        sessionStorage.setItem('__theme_suite_init_done', '1');
       }
     });
   });
@@ -159,11 +158,24 @@ test.describe('theme toggle (happy variant)', () => {
       localStorage.setItem('worldmonitor-variant', 'happy');
     });
 
-    await page.goto('/');
+    let activePage = page;
+    try {
+      await activePage.goto('/');
+    } catch (error) {
+      // Rare Chromium worker/page teardown in long suites: recreate page once.
+      const nextPage = await page.context().newPage();
+      await nextPage.addInitScript(() => {
+        localStorage.setItem('worldmonitor-theme', 'dark');
+        localStorage.setItem('worldmonitor-variant', 'happy');
+      });
+      await nextPage.goto('/');
+      activePage = nextPage;
+      console.warn('[theme-toggle:e2e] Recovered from page-close during no-FOUC check', error);
+    }
 
     // The inline script should set data-theme="dark" before CSS loads
     // Measure the data-theme immediately after navigation
-    const theme = await page.evaluate(() => document.documentElement.dataset.theme);
+    const theme = await activePage.evaluate(() => document.documentElement.dataset.theme);
     expect(theme).toBe('dark');
   });
 

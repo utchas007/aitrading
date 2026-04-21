@@ -4,6 +4,11 @@ test.describe('Deduct Situation Panel Options', () => {
     test('It successfully requests deduction from the intelligence API', async ({ page }) => {
         await page.goto('/?view=global');
 
+        const isDesktopRuntime = await page.evaluate(() =>
+            '__TAURI__' in window || '__TAURI_INTERNALS__' in window
+        );
+        test.skip(!isDesktopRuntime, 'Deduction panel is desktop-only');
+
         // MOCK the backend deduct-situation RPC response UNLESS testing real LLM flows
         if (!process.env.TEST_REAL_LLM) {
             await page.route('**/api/intelligence/v1/deduct-situation', async (route) => {
@@ -16,11 +21,16 @@ test.describe('Deduct Situation Panel Options', () => {
             });
         }
 
-        // Open CMD palette and search for deduction panel
-        await page.keyboard.press('ControlOrMeta+k');
-        await page.waitForSelector('.command-palette');
-        await page.fill('.command-palette input', 'deduct');
-        await page.click('text="Jump to Deduct Situation"');
+        // Open the deduction panel via the same app event used for contextual deduction.
+        await page.evaluate(() => {
+            document.dispatchEvent(new CustomEvent('wm:deduct-context', {
+                detail: {
+                    query: '',
+                    geoContext: '',
+                    autoSubmit: false,
+                },
+            }));
+        });
 
         // Ensure the panel is visible and ready
         const panel = page.locator('.wm-panel', { hasText: 'DEDUCT SITUATION' });

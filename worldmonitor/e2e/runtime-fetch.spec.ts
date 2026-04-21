@@ -378,7 +378,7 @@ test.describe('desktop runtime routing guardrails', () => {
 
     expect(result.macArm).toBe('https://worldmonitor.app/api/download?platform=macos-arm64&variant=full');
     expect(result.windowsX64).toBe('https://worldmonitor.app/api/download?platform=windows-exe&variant=full');
-    expect(result.linuxFallback).toBe('https://github.com/koala73/worldmonitor/releases/latest');
+    expect(result.linuxFallback).toBe('https://worldmonitor.app/api/download?platform=linux-appimage&variant=full');
   });
 
   test('MapContainer falls back to SVG when WebGL2 is unavailable', async ({ page }) => {
@@ -562,10 +562,13 @@ test.describe('desktop runtime routing guardrails', () => {
         calls.push(url);
         const parsed = new URL(url);
 
-        // Sebuf proto: POST /api/market/v1/list-market-quotes
+        // Sebuf proto: GET /api/market/v1/list-market-quotes?symbols=A,B,C
         if (parsed.pathname === '/api/market/v1/list-market-quotes') {
-          const body = init?.body ? JSON.parse(String(init.body)) : {};
-          const symbols: string[] = body.symbols || [];
+          const rawSymbols = parsed.searchParams.get('symbols') ?? '';
+          const symbols = rawSymbols
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
           const quotes = symbols
             .filter((s: string) => yahooOnly.has(s))
             .map((s: string) => {
@@ -577,6 +580,26 @@ test.describe('desktop runtime routing guardrails', () => {
             finnhubSkipped: true,
             skipReason: 'FINNHUB_API_KEY not configured',
           });
+        }
+
+        if (parsed.pathname === '/api/market/v1/list-commodity-quotes') {
+          const rawSymbols = parsed.searchParams.get('symbols') ?? '';
+          const symbols = rawSymbols
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const quotes = symbols.map((s: string) => {
+            const base = s.length * 100;
+            return {
+              symbol: s,
+              name: s,
+              display: s,
+              price: base + 5,
+              change: 0.5,
+              sparkline: [base - 1, base, base + 1],
+            };
+          });
+          return responseJson({ quotes });
         }
 
         // Sebuf proto: POST /api/market/v1/list-crypto-quotes
@@ -631,6 +654,9 @@ test.describe('desktop runtime routing guardrails', () => {
         const marketQuoteCalls = calls.filter((url) =>
           new URL(url).pathname === '/api/market/v1/list-market-quotes'
         );
+        const commodityQuoteCalls = calls.filter((url) =>
+          new URL(url).pathname === '/api/market/v1/list-commodity-quotes'
+        );
 
         return {
           marketRenders,
@@ -643,6 +669,7 @@ test.describe('desktop runtime routing guardrails', () => {
           apiStatuses,
           latestMarketsCount: fakeApp.ctx.latestMarkets.length,
           marketQuoteCalls: marketQuoteCalls.length,
+          commodityQuoteCalls: commodityQuoteCalls.length,
         };
       } finally {
         window.fetch = originalFetch;
@@ -658,8 +685,9 @@ test.describe('desktop runtime routing guardrails', () => {
 
     expect(result.commoditiesRenders.some((count) => count > 0)).toBe(true);
     expect(result.commoditiesConfigErrors.length).toBe(0);
-    // Commodities go through listMarketQuotes batch (at least 2 calls: stocks + commodities)
-    expect(result.marketQuoteCalls).toBeGreaterThanOrEqual(2);
+    // Stocks and commodities are now fetched via separate endpoints.
+    expect(result.marketQuoteCalls).toBeGreaterThanOrEqual(1);
+    expect(result.commodityQuoteCalls).toBeGreaterThanOrEqual(1);
 
     expect(result.cryptoRenders.some((count) => count > 0)).toBe(true);
     expect(result.apiStatuses.some((entry) => entry.name === 'Finnhub' && entry.status === 'error')).toBe(true);
@@ -687,8 +715,7 @@ test.describe('desktop runtime routing guardrails', () => {
       window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const parsed = new URL(toUrl(input));
         if (parsed.pathname === '/api/conflict/v1/get-humanitarian-summary') {
-          const body = init?.body ? JSON.parse(String(init.body)) : {};
-          const countryCode = String(body.countryCode || '').toUpperCase();
+          const countryCode = String(parsed.searchParams.get('country_code') || '').toUpperCase();
           seenCountryCodes.add(countryCode);
           return responseJson({
             summary: {

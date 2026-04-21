@@ -52,6 +52,7 @@ export class CircuitBreaker<T> {
   private persistentLoadPromise: Promise<void> | null = null;
   private lastDataState: BreakerDataState = { mode: 'unavailable', timestamp: null, offline: false };
   private backgroundRefreshPromise: Promise<void> | null = null;
+  private cacheHydratedFromPersistent = false;
 
   constructor(options: CircuitBreakerOptions) {
     this.name = options.name;
@@ -84,6 +85,7 @@ export class CircuitBreaker<T> {
         // Only hydrate if in-memory cache is empty (don't overwrite live data)
         if (this.cache === null) {
           this.cache = { data: entry.data, timestamp: entry.updatedAt };
+          this.cacheHydratedFromPersistent = true;
           const withinTtl = (Date.now() - entry.updatedAt) < this.cacheTtlMs;
           this.lastDataState = {
             mode: withinTtl ? 'cached' : 'unavailable',
@@ -160,6 +162,7 @@ export class CircuitBreaker<T> {
   recordSuccess(data: T): void {
     this.state = { failures: 0, cooldownUntil: 0 };
     this.cache = { data, timestamp: Date.now() };
+    this.cacheHydratedFromPersistent = false;
     this.lastDataState = { mode: 'live', timestamp: Date.now(), offline: false };
 
     if (this.persistEnabled) {
@@ -169,6 +172,7 @@ export class CircuitBreaker<T> {
 
   clearCache(): void {
     this.cache = null;
+    this.cacheHydratedFromPersistent = false;
     this.backgroundRefreshPromise = null;
     this.persistentLoadPromise = null; // orphan any in-flight hydration
     if (this.persistEnabled) {
@@ -220,7 +224,7 @@ export class CircuitBreaker<T> {
     // Skip SWR when cacheTtlMs === 0 (caching disabled) — the breaker may be
     // shared across calls with different request params (e.g. stocks vs commodities),
     // so returning stale data from a different call is wrong.
-    if (this.cache !== null && this.cacheTtlMs > 0) {
+    if (this.cache !== null && this.cacheTtlMs > 0 && !this.cacheHydratedFromPersistent) {
       this.lastDataState = { mode: 'cached', timestamp: this.cache.timestamp, offline };
       // Fire-and-forget background refresh — guard against concurrent SWR fetches
       // so that multiple callers with stale cache don't each spawn a parallel request.
@@ -235,6 +239,20 @@ export class CircuitBreaker<T> {
         });
       }
       return this.cache.data as R;
+    }
+
+    if (this.cache !== null && this.cacheTtlMs > 0 && this.cacheHydratedFromPersistent) {
+      try {
+        const result = await fn();
+        this.recordSuccess(result);
+        return result;
+      } catch (e) {
+        const msg = String(e);
+        console.warn(`[${this.name}] Fresh fetch failed after stale persistent hydrate:`, msg);
+        this.recordFailure(msg);
+        this.lastDataState = { mode: 'unavailable', timestamp: this.cache.timestamp, offline };
+        return this.getCachedOrDefault(defaultValue) as R;
+      }
     }
 
     try {
