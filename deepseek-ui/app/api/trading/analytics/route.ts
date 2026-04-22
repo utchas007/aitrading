@@ -200,6 +200,32 @@ export async function GET(req: NextRequest) {
         winRate: v.trades > 0 ? +(v.wins / v.trades).toFixed(3) : 0,
       }));
 
+    // --- Hourly breakdown (ET) — which hours of day are most profitable ---
+    const hourMap: Record<number, Bucket> = {};
+    for (const t of trades) {
+      const etTime = new Date(new Date(t.createdAt).toLocaleString('en-US', { timeZone: 'America/New_York' }));
+      const h = etTime.getHours();
+      if (!hourMap[h]) hourMap[h] = { pnl: 0, trades: 0, wins: 0 };
+      hourMap[h].pnl    += t._pnl;
+      hourMap[h].trades += 1;
+      if (t._pnl > 0) hourMap[h].wins += 1;
+    }
+    const hourlyBreakdown = Object.entries(hourMap)
+      .sort(([a], [b]) => Number(a) - Number(b))
+      .map(([h, v]) => {
+        const hour = Number(h);
+        const suffix  = hour < 12 ? 'AM' : 'PM';
+        const display = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+        return {
+          hour,
+          label:   `${display} ${suffix}`,
+          pnl:     +v.pnl.toFixed(2),
+          trades:  v.trades,
+          wins:    v.wins,
+          winRate: v.trades > 0 ? +(v.wins / v.trades).toFixed(3) : 0,
+        };
+      });
+
     // --- Close reasons ---
     const reasonMap: Record<string, number> = {};
     for (const t of trades) {
@@ -247,6 +273,7 @@ export async function GET(req: NextRequest) {
       weeklyBreakdown:  toBucketArray(weekMap,  'weekStart'),
       monthlyBreakdown: toBucketArray(monthMap, 'month'),
       pairBreakdown,
+      hourlyBreakdown,
       recentTrades,
     });
   } catch (error: unknown) {

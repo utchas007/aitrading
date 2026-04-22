@@ -33,6 +33,7 @@ interface Summary {
 interface CumulativePoint { date: string | null; cumulativePnl: number; tradePnl: number; pair: string }
 interface BucketPoint     { pnl: number; trades: number; wins: number; [key: string]: string | number }
 interface PairPoint       { pair: string; pnl: number; trades: number; wins: number; winRate: number }
+interface HourlyPoint     { hour: number; label: string; pnl: number; trades: number; wins: number; winRate: number }
 interface RecentTrade {
   id: number; pair: string; type: string;
   entryPrice: number; exitPrice: number | null;
@@ -47,6 +48,7 @@ interface AnalyticsData {
   weeklyBreakdown: BucketPoint[];
   monthlyBreakdown: BucketPoint[];
   pairBreakdown: PairPoint[];
+  hourlyBreakdown: HourlyPoint[];
   recentTrades: RecentTrade[];
 }
 
@@ -415,6 +417,39 @@ export default function PnLAnalytics() {
               )}
             </div>
           </div>
+
+          {/* ── Time-of-Day Breakdown ── */}
+          {data.hourlyBreakdown.length > 0 && (
+            <div style={{ background: CARD_BG, border: `1px solid ${BORDER}`, borderRadius: 10, padding: '16px 20px', marginBottom: 24 }}>
+              <SectionTitle>P&amp;L by Hour of Day (ET)</SectionTitle>
+              <ResponsiveContainer width="100%" height={180}>
+                <BarChart data={data.hourlyBreakdown} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={BORDER} vertical={false} />
+                  <XAxis dataKey="label" stroke="#555" style={{ fontSize: 10 }} />
+                  <YAxis stroke="#555" style={{ fontSize: 10 }} tickFormatter={v => fmtUSD(v)} width={64} />
+                  <ReferenceLine y={0} stroke="#333" />
+                  <Tooltip
+                    content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null;
+                      const d = payload[0].payload as HourlyPoint;
+                      return (
+                        <div style={{ background: '#0a0a14', border: `1px solid ${BORDER}`, borderRadius: 8, padding: 12, fontSize: 12 }}>
+                          <div style={{ color: DIM, marginBottom: 4 }}>{d.label} ET</div>
+                          <div style={{ color: d.pnl >= 0 ? GREEN : RED, fontWeight: 600 }}>{fmtUSD(d.pnl)}</div>
+                          <div style={{ color: DIM, marginTop: 2 }}>{d.trades} trade{d.trades !== 1 ? 's' : ''} · {Math.round(d.winRate * 100)}% win</div>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Bar dataKey="pnl" radius={[3, 3, 0, 0]}>
+                    {data.hourlyBreakdown.map((entry, i) => (
+                      <Cell key={i} fill={entry.pnl >= 0 ? `${GREEN}cc` : `${RED}cc`} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
 
           {/* ── Close Reasons + Recent Trades ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 16 }}>

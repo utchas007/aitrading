@@ -173,3 +173,20 @@ export function getMarketSession(): MarketSession {
 export function isMarketOpen(): boolean {
   return getMarketSession().isOpen;
 }
+
+/**
+ * Returns true during the two noisiest windows of the trading day (ET):
+ *   - Opening noise: 9:30–10:00 AM  (first 30 min — gap fills, stop-hunts)
+ *   - Closing noise: 3:45–4:00 PM   (last 15 min — position squaring)
+ * The bot skips NEW signal generation during these windows while still
+ * monitoring open positions normally.
+ */
+export function isNoisyTradingPeriod(): { isNoisy: boolean; reason: string } {
+  const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const totalMin = etNow.getHours() * 60 + etNow.getMinutes();
+  if (totalMin >= 570 && totalMin < 600) // 9:30–10:00 AM
+    return { isNoisy: true, reason: 'Opening noise window (9:30–10:00 AM ET)' };
+  if (totalMin >= 945 && totalMin < 960) // 3:45–4:00 PM
+    return { isNoisy: true, reason: 'Closing noise window (3:45–4:00 PM ET)' };
+  return { isNoisy: false, reason: '' };
+}

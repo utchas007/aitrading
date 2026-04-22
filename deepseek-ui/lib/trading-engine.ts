@@ -17,7 +17,7 @@ import {
 import {
   getWorldMonitorSummary, getMarketContextForAI,
 } from './worldmonitor-data';
-import { getMarketSession } from './market-hours';
+import { getMarketSession, isNoisyTradingPeriod } from './market-hours';
 import { saveNotification } from './notify';
 import { checkBalanceDrop, alertIBDisconnected } from './alerting';
 import {
@@ -284,6 +284,13 @@ export class TradingEngine {
       return;
     }
 
+    // Skip signal generation during noisy open/close windows
+    const noisy = isNoisyTradingPeriod();
+    if (noisy.isNoisy) {
+      logActivity.info(`⏸️ Skipping signals — ${noisy.reason} (positions still monitored)`);
+      return;
+    }
+
     // IB health check — stop engine after MAX_IB_FAILURES consecutive failures
     try {
       const health = await createIBClient().getHealth();
@@ -526,6 +533,22 @@ export class TradingEngine {
     const technicalSignals = analyzeTechnicalIndicators(priceData);
     const currentPrice = priceData[priceData.length - 1].close;
 
+    // 1-hour MTF trend score: +1 per bullish indicator, -1 per bearish (-2 to +2)
+    let h1TrendScore = 0;
+    try {
+      const h1Data = await getHistoricalPrices(pair, 60);
+      if (h1Data.length >= 20) {
+        const h1 = analyzeTechnicalIndicators(h1Data);
+        if (h1.ema.trend === 'bullish')  h1TrendScore++;
+        else if (h1.ema.trend === 'bearish') h1TrendScore--;
+        if (h1.macd.trend === 'bullish') h1TrendScore++;
+        else if (h1.macd.trend === 'bearish') h1TrendScore--;
+        logActivity.calculating(`${pair}: 1H EMA=${h1.ema.trend} MACD=${h1.macd.trend} (MTF score: ${h1TrendScore > 0 ? '+' : ''}${h1TrendScore})`);
+      }
+    } catch {
+      // 1h data unavailable — proceed without MTF filter
+    }
+
     // Fetch World Monitor news for fundamental analysis
     const news = await this.fetchWorldMonitorNews();
 
@@ -676,6 +699,26 @@ export class TradingEngine {
       if (technicalSignals.macd.histogram <= 0) {
         logActivity.warning(`${pair}: Elevated VIX + MACD histogram ≤ 0 (${technicalSignals.macd.histogram.toFixed(2)}) — no momentum. HOLD.`);
         action = 'hold';
+      }
+    }
+
+    // ── Micro filter 4: Multi-timeframe confirmation ─────────────────────────
+    // 1H EMA + MACD must not contradict the daily signal direction.
+    // Opposition cuts confidence by 20pts (blocks if below minConfidence).
+    // Agreement gives a small +5pt boost.
+    if (action !== 'hold' && h1TrendScore !== 0) {
+      const opposed = (action === 'buy' && h1TrendScore < 0) || (action === 'sell' && h1TrendScore > 0);
+      const aligned = (action === 'buy' && h1TrendScore > 0) || (action === 'sell' && h1TrendScore < 0);
+      if (opposed) {
+        confidence = Math.max(0, confidence - 20);
+        logActivity.warning(`${pair}: 1H trend opposes ${action.toUpperCase()} signal — confidence cut to ${confidence}%`);
+        if (confidence < this.config.minConfidence) {
+          action = 'hold';
+          logActivity.warning(`${pair}: MTF filter blocked signal (confidence ${confidence}% < threshold ${this.config.minConfidence}%)`);
+        }
+      } else if (aligned) {
+        confidence = Math.min(100, confidence + 5);
+        logActivity.info(`${pair}: 1H confirms ${action.toUpperCase()} — confidence +5 → ${confidence}%`);
       }
     }
 
