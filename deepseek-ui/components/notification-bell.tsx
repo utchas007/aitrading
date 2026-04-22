@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { readJsonSafely } from "@/lib/safe-json";
 
 interface Notification {
   id: number;
@@ -28,7 +29,7 @@ export default function NotificationBell() {
   const fetchNotifications = useCallback(async () => {
     try {
       const res = await fetch("/api/notifications");
-      const data = await res.json();
+      const data = await readJsonSafely<any>(res, 'notifications');
       if (data.success) {
         setNotifications(data.notifications);
         setUnreadCount(data.unreadCount);

@@ -32,6 +32,43 @@ services:
       timeout:  5s
       retries:  5
 
+  # ── Ollama LLM Service (optional CPU fallback) ─────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: trading-ollama
+    restart: unless-stopped
+    profiles: ["cpu-fallback"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "-1"
+    healthcheck:
+      test: ["CMD", "ollama", "--version"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ── Ollama Warmup (optional CPU fallback) ─────────────────────────────────
+  ollama-warmup:
+    image: curlimages/curl:8.12.1
+    container_name: trading-ollama-warmup
+    restart: "no"
+    profiles: ["cpu-fallback"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >
+      until curl -sf http://ollama:11434/api/tags >/dev/null; do sleep 2; done;
+      if ! curl -sf http://ollama:11434/api/tags | grep -q '"name":"deepseek-r1:14b"'; then
+        curl -sf http://ollama:11434/api/pull -d '{"model":"deepseek-r1:14b","stream":false}' >/dev/null;
+      fi;
+      curl -sf http://ollama:11434/api/generate
+      -d '{"model":"deepseek-r1:14b","prompt":"","stream":false,"keep_alive":"-1"}' >/dev/null
+
   # ── IB Service (Python FastAPI) ───────────────────────────────────────────────
   # NOTE: IB service must reach TWS/Gateway running on the HOST machine.
   # Set IB_HOST to your host machine's LAN IP (not localhost).
@@ -41,18 +78,17 @@ services:
       dockerfile: Dockerfile.ib
     container_name: trading-ib-service
     restart: unless-stopped
-    ports:
-      - "8765:8765"
+    # Host networking so the IB service appears as 127.0.0.1 to TWS,
+    # bypassing the "allow localhost only" restriction in TWS API settings.
+    network_mode: host
     environment:
-      IB_HOST:         ${IB_HOST:-host.docker.internal}
+      IB_HOST:         127.0.0.1
       IB_PORT:         ${IB_PORT:-7497}
       IB_CLIENT:       ${IB_CLIENT:-10}
       IB_SERVICE_PORT: 8765
       IB_LOG_LEVEL:    ${IB_LOG_LEVEL:-INFO}
       IB_ACCESS_LOG:   "0"
-      IB_CORS_ORIGINS: "http://nextjs:3001,http://localhost:3001"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      IB_CORS_ORIGINS: "http://localhost:3001,http://localhost:3000"
 
   # ── Next.js Dashboard ────────────────────────────────────────────────────────
   nextjs:
@@ -62,26 +98,29 @@ services:
     container_name: trading-nextjs
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      - "3001:3000"
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL:    postgresql://tradingbot:tradingbot123@postgres:5432/tradingdb
-      IB_SERVICE_URL:  http://ib-service:8765
-      OLLAMA_API_URL:  ${OLLAMA_API_URL:-http://host.docker.internal:11434}
-      OLLAMA_MODEL:    ${OLLAMA_MODEL:-deepseek-r1:14b}
-      WORLDMONITOR_URL: ${WORLDMONITOR_URL:-http://worldmonitor:3000}
-      NEXTJS_URL:      http://nextjs:3001
-      LOG_LEVEL:       ${LOG_LEVEL:-info}
-      NODE_ENV:        production
+      DATABASE_URL:        postgresql://tradingbot:tradingbot123@postgres:5432/tradingdb
+      IB_SERVICE_URL:      http://host.docker.internal:8765
+      OLLAMA_API_URL:      ${OLLAMA_API_URL:-http://host.docker.internal:11500}
+      OLLAMA_MODEL:        ${OLLAMA_MODEL:-deepseek-r1:14b}
+      WORLDMONITOR_URL:    ${WORLDMONITOR_URL:-http://worldmonitor:3000}
+      NEXTJS_URL:          http://nextjs:3000
+      KRAKEN_API_KEY:      ${KRAKEN_API_KEY}
+      KRAKEN_PRIVATE_KEY:  ${KRAKEN_PRIVATE_KEY}
+      LOG_LEVEL:           ${LOG_LEVEL:-info}
+      NODE_ENV:            production
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3001/api/health"]
-      interval: 30s
-      timeout:  10s
+      test: ["CMD", "node", "-e", "const os=require('os');const http=require('http');http.get({host:os.hostname(),port:3000,path:'/api/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1));"]
+      interval: 10s
+      timeout:  5s
       retries:  3
+      start_period: 15s
 
   # ── WebSocket Server ──────────────────────────────────────────────────────────
   websocket:
@@ -94,16 +133,64 @@ services:
       - "3002:3002"
     depends_on:
       nextjs:
-        condition: service_healthy
+        condition: service_started
     environment:
       DATABASE_URL:    postgresql://tradingbot:tradingbot123@postgres:5432/tradingdb
-      IB_SERVICE_URL:  http://ib-service:8765
-      NEXTJS_URL:      http://nextjs:3001
+      IB_SERVICE_URL:  http://host.docker.internal:8765
+      NEXTJS_URL:      http://nextjs:3000
       WS_PORT:         3002
-      WS_CORS_ORIGINS: "http://localhost:3001,http://nextjs:3001"
+      WS_CORS_ORIGINS: "http://localhost:3001,http://nextjs:3000"
       LOG_LEVEL:       ${LOG_LEVEL:-info}
       NODE_ENV:        production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ── World Monitor ─────────────────────────────────────────────────────────────
+  worldmonitor:
+    build:
+      context: worldmonitor
+      dockerfile: Dockerfile
+    container_name: trading-worldmonitor
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      OLLAMA_API_URL:       ${OLLAMA_API_URL:-http://host.docker.internal:11500}
+      OLLAMA_MODEL:         ${OLLAMA_MODEL:-deepseek-r1:14b}
+      FINNHUB_API_KEY:      d7h1hv1r01qmqj474m4gd7h1hv1r01qmqj474m50
+      VITE_FINNHUB_API_KEY: d7h1hv1r01qmqj474m4gd7h1hv1r01qmqj474m50
+      EIA_API_KEY:          S4MC5CFni2Vuw4PTrr0pqgF9kIWD9USr9bTgdRt7
+      FRED_API_KEY:         637673e0ab20b7228d8918e5900bd4bf
+      VITE_VARIANT:         full
+      VITE_MAP_INTERACTION_MODE: 3d
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ── AI Trading Bot ────────────────────────────────────────────────────────────
+  trading-bot:
+    build:
+      context:    deepseek-ui
+      dockerfile: Dockerfile.bot
+    container_name: trading-bot
+    restart: unless-stopped
+    ports:
+      - "3003:3003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nextjs:
+        condition: service_started
+    environment:
+      DATABASE_URL:    postgresql://tradingbot:tradingbot123@postgres:5432/tradingdb
+      IB_SERVICE_URL:  http://host.docker.internal:8765
+      NEXTJS_URL:      http://nextjs:3000
+      BOT_PORT:        3003
+      NODE_ENV:        production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   postgres_data:
+    driver: local
+  ollama_data:
     driver: local

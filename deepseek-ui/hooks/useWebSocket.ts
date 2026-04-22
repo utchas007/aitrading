@@ -91,10 +91,24 @@ export interface AlertEvent {
   timestamp: string;
 }
 
+export interface OrderData {
+  order_id: number;
+  symbol: string;
+  action: string;
+  quantity: number;
+  order_type: string;
+  limit_price: number;
+  status: string;
+  filled: number;
+  remaining: number;
+  avg_fill_price: number;
+}
+
 export interface WebSocketData {
   prices: Record<string, PriceData>;
   balance: BalanceData | null;
   positions: PositionData[];
+  orders: OrderData[];
   botStatus: BotStatus | null;
   activities: Activity[];
   ibHealth: IBHealth | null;
@@ -107,6 +121,7 @@ export function useWebSocket() {
     prices: {},
     balance: null,
     positions: [],
+    orders: [],
     botStatus: null,
     activities: [],
     ibHealth: null,
@@ -167,6 +182,14 @@ export function useWebSocket() {
       setData(prev => ({
         ...prev,
         positions,
+        lastUpdate: new Date(),
+      }));
+    });
+
+    socket.on('orders', (orders: OrderData[]) => {
+      setData(prev => ({
+        ...prev,
+        orders,
         lastUpdate: new Date(),
       }));
     });

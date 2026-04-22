@@ -121,6 +121,7 @@ export interface PlaceOcaOrderResult {
   oca_group: string;
   stop_price: number;
   limit_price: number;
+  // live order fields (validate_only=false)
   stop_order_id?: number;
   limit_order_id?: number;
   stop_status?: string;

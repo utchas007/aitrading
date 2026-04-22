@@ -19,6 +19,7 @@ const latestData: {
   prices: Record<string, any>;
   balance: Record<string, any> | null;
   positions: any[];
+  orders: any[];
   activities: any[];
   botStatus: any;
   ibHealth: any;
@@ -26,6 +27,7 @@ const latestData: {
   prices: {},
   balance: null,
   positions: [],
+  orders: [],
   activities: [],
   botStatus: null,
   ibHealth: null,
@@ -60,10 +62,11 @@ async function fetchAndBroadcast(io: SocketIOServer) {
   const ibUrl   = IB_SERVICE_URL;
 
   try {
-    const [pricesRes, balanceRes, positionsRes, engineRes, healthRes] = await Promise.all([
+    const [pricesRes, balanceRes, positionsRes, ordersRes, engineRes, healthRes] = await Promise.all([
       fetchWithTimeout(`${baseUrl}/api/stocks/ticker?symbols=${currentWatchlist.join(',')}`),
       fetchWithTimeout(`${ibUrl}/balance`),
       fetchWithTimeout(`${ibUrl}/positions`),
+      fetchWithTimeout(`${ibUrl}/orders`),
       fetchWithTimeout(`${baseUrl}/api/trading/engine`),
       fetchWithTimeout(`${ibUrl}/health`),
     ]);
@@ -100,6 +103,15 @@ async function fetchAndBroadcast(io: SocketIOServer) {
       if (JSON.stringify(positionsRes) !== JSON.stringify(latestData.positions)) {
         latestData.positions = positionsRes;
         io.emit('positions', positionsRes);
+      }
+    }
+
+    // Open orders — emit on any change so UI reflects fills/cancels immediately
+    if (ordersRes && Array.isArray(ordersRes)) {
+      const openOrders = ordersRes.filter((o: any) => !['Filled', 'Cancelled', 'Inactive'].includes(o.status));
+      if (JSON.stringify(openOrders) !== JSON.stringify(latestData.orders)) {
+        latestData.orders = openOrders;
+        io.emit('orders', openOrders);
       }
     }
 
@@ -207,6 +219,7 @@ io.on('connection', (socket) => {
   if (Object.keys(latestData.prices).length > 0) socket.emit('prices', latestData.prices);
   if (latestData.balance) socket.emit('balance', latestData.balance);
   if (latestData.positions.length > 0) socket.emit('positions', latestData.positions);
+  socket.emit('orders', latestData.orders);
   if (latestData.botStatus) socket.emit('botStatus', latestData.botStatus);
   if (latestData.activities.length > 0) socket.emit('activities', latestData.activities.slice(0, 20));
   if (latestData.ibHealth) socket.emit('ibHealth', latestData.ibHealth);

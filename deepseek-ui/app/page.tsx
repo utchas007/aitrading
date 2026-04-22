@@ -110,43 +110,28 @@ export default function Home() {
           display: 'flex',
           gap: 8,
           alignItems: 'center',
-          overflowX: 'auto',
-          scrollbarWidth: 'thin',
           maxWidth: '100%',
+          minWidth: 0,
         }}>
           <NotificationBell />
-          <button
-            className="nav-btn"
-            onClick={() => setView('analytics')}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 8,
-              border: '1px solid',
-              borderColor: view === 'analytics' ? '#00ff9f' : '#2a2a4a',
-              background: view === 'analytics' ? '#00ff9f22' : 'transparent',
-              color: view === 'analytics' ? '#00ff9f' : '#888',
-              cursor: 'pointer',
-              fontSize: 12,
-              fontWeight: 600,
-              transition: 'all 0.2s',
-              whiteSpace: 'nowrap',
-              flexShrink: 0,
-            }}
-          >
-            📊 Analytics
-          </button>
-          {NAV_ITEMS.map(({ id, label }) => (
+          <div style={{
+            display: 'flex',
+            gap: 8,
+            alignItems: 'center',
+            overflowX: 'auto',
+            scrollbarWidth: 'thin',
+            minWidth: 0,
+          }}>
             <button
-              key={id}
               className="nav-btn"
-              onClick={() => setView(id)}
+              onClick={() => setView('analytics')}
               style={{
                 padding: '8px 16px',
                 borderRadius: 8,
                 border: '1px solid',
-                borderColor: view === id ? '#00ff9f' : '#2a2a4a',
-                background: view === id ? '#00ff9f22' : 'transparent',
-                color: view === id ? '#00ff9f' : '#888',
+                borderColor: view === 'analytics' ? '#00ff9f' : '#2a2a4a',
+                background: view === 'analytics' ? '#00ff9f22' : 'transparent',
+                color: view === 'analytics' ? '#00ff9f' : '#888',
                 cursor: 'pointer',
                 fontSize: 12,
                 fontWeight: 600,
@@ -155,9 +140,32 @@ export default function Home() {
                 flexShrink: 0,
               }}
             >
-              {label}
+              📊 Analytics
             </button>
-          ))}
+            {NAV_ITEMS.map(({ id, label }) => (
+              <button
+                key={id}
+                className="nav-btn"
+                onClick={() => setView(id)}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: 8,
+                  border: '1px solid',
+                  borderColor: view === id ? '#00ff9f' : '#2a2a4a',
+                  background: view === id ? '#00ff9f22' : 'transparent',
+                  color: view === id ? '#00ff9f' : '#888',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  transition: 'all 0.2s',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

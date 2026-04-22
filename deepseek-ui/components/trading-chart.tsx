@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from 'react';
+import { readJsonSafely } from '@/lib/safe-json';
 
 interface TradingChartProps {
   pair: string;
@@ -156,9 +157,14 @@ export default function TradingChart({ pair, interval = 60, height = 400 }: Trad
       const { barSize, duration } = intervalToIB(currentInterval);
       const params = new URLSearchParams({ symbol: currentPair, barSize, duration });
       const res = await fetch(`/api/ib/ohlc?${params}`);
-      const data = await res.json();
+      const data = await readJsonSafely<any>(res, 'OHLC data');
 
       if (!data.success) throw new Error(data.error || 'Failed to fetch chart data');
+      if (!data.bars?.length) {
+        setError(data.source === 'rate_limited' ? 'Chart data rate-limited — retry in a moment' : 'No chart data available');
+        setLoading(false);
+        return;
+      }
 
       const candleData = data.bars.map((c: any) => ({
         time: Math.floor(new Date(c.time).getTime() / 1000) as any,

@@ -116,7 +116,7 @@ export async function GET(req: NextRequest) {
     ]);
 
     const trades = closedTrades.map((t) => {
-      const pnl = deriveFallbackPnl(t as ClosedTrade);
+      const pnl = deriveFallbackPnl(t as ClosedTrade) ?? 0;
       const pnlPercent = deriveFallbackPnlPercent(t as ClosedTrade, pnl);
       return { ...t, _pnl: pnl, _pnlPercent: pnlPercent };
     });

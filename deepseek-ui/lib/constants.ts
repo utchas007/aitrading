@@ -22,6 +22,12 @@ export const DEFAULT_STOP_LOSS_PERCENT = 0.05;
 /** Take-profit distance from entry as a fraction (e.g. 0.10 = 10%). */
 export const DEFAULT_TAKE_PROFIT_PERCENT = 0.10;
 
+/** Profit % at which the trailing stop activates (e.g. 0.07 = 7%). */
+export const DEFAULT_TRAILING_ACTIVATION_PERCENT = 0.07;
+
+/** How far the trailing stop trails below the highest price (e.g. 0.03 = 3%). */
+export const DEFAULT_TRAILING_STOP_PERCENT = 0.03;
+
 /** Market check interval in milliseconds (default: 2 minutes). */
 export const DEFAULT_CHECK_INTERVAL_MS = 2 * 60 * 1000;
 

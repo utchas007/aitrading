@@ -26,6 +26,7 @@ const chatRequestSchema = z.object({
 });
 
 const log = createLogger('api/chat');
+const IB_SERVICE_URL = process.env.IB_SERVICE_URL || 'http://localhost:8765';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -116,7 +117,7 @@ function parseTradeCommand(text: string): ParsedCommand | null {
 async function getLatestPrice(symbol: string): Promise<number | null> {
   try {
     const res = await fetch(
-      `http://localhost:8765/ohlc/${symbol}?bar_size=5+mins&duration=1+D`,
+      `${IB_SERVICE_URL}/ohlc/${symbol}?bar_size=5+mins&duration=1+D`,
       { signal: AbortSignal.timeout(TIMEOUTS.HISTORICAL_MS) }
     );
     if (!res.ok) return null;
@@ -153,7 +154,17 @@ async function executeTradeCommand(cmd: ParsedCommand): Promise<TradeCommandResu
         ? pos.position
         : Math.min(cmd.quantity as number, pos.position);
 
-      const res = await fetch('http://localhost:8765/order', {
+      // Cancel any open bracket orders (SL/TP) for this symbol before selling
+      const { prisma } = await import('@/lib/db');
+      const openTrades = await prisma.trade.findMany({
+        where: { pair: cmd.symbol, status: 'open' },
+        select: { id: true, slOrderId: true, tpOrderId: true },
+      });
+      const cancelIds = openTrades.flatMap(t => [t.slOrderId, t.tpOrderId]).filter((id): id is number => id != null);
+      await Promise.allSettled(cancelIds.map(id => ib.cancelOrder(id)));
+
+      // Place market sell
+      const res = await fetch(`${IB_SERVICE_URL}/order`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -172,10 +183,27 @@ async function executeTradeCommand(cmd: ParsedCommand): Promise<TradeCommandResu
       }
 
       const order = await res.json();
+      const exitPrice: number | undefined = order.avg_fill_price > 0 ? order.avg_fill_price : undefined;
+      const pnl = exitPrice != null ? (exitPrice - pos.avg_cost) * qty : null;
+
+      // Mark trades as closed in DB
+      await prisma.trade.updateMany({
+        where: { pair: cmd.symbol, status: 'open' },
+        data: {
+          status:      'closed',
+          exitPrice:   exitPrice ?? null,
+          pnl:         pnl,
+          pnlPercent:  pnl != null ? (pnl / (pos.avg_cost * qty)) * 100 : null,
+          closedAt:    new Date(),
+          closeReason: 'manual',
+        },
+      });
+
+      const pnlStr = pnl != null ? ` | P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '';
       return {
         executed: true, symbol: cmd.symbol, quantity: qty, action: 'sell',
         orderId: order.order_id, status: order.status,
-        message: `✅ SELL order placed: ${qty} shares of ${cmd.symbol} at market (Order #${order.order_id}, status: ${order.status}). Your avg cost was $${pos.avg_cost.toFixed(2)}/share.`,
+        message: `✅ SELL order placed: ${qty} shares of ${cmd.symbol} at market (Order #${order.order_id}, status: ${order.status}). Avg cost $${pos.avg_cost.toFixed(2)}/share${pnlStr}. Bracket orders cancelled.`,
       };
     }
 
@@ -220,7 +248,7 @@ async function executeTradeCommand(cmd: ParsedCommand): Promise<TradeCommandResu
     const entryLimit = parseFloat((price * 1.005).toFixed(2)); // 0.5% slippage buffer
 
     // 4. Place bracket order (GTC children via ib_service)
-    const res = await fetch('http://localhost:8765/bracket-order', {
+    const res = await fetch(`${IB_SERVICE_URL}/bracket-order`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -299,42 +327,12 @@ export async function POST(req: NextRequest) {
     // ── Detect & execute trade commands from the latest user message ──────────
     const lastUserMsg = [...messages].reverse().find((m: any) => m.role === 'user');
     let tradeResult: TradeCommandResult | null = null;
-    let pendingConfirmation: string | null = null;
 
     if (lastUserMsg) {
-      const userText = lastUserMsg.content.trim().toLowerCase();
-      const isConfirm = /^confirm$/.test(userText);
-
-      if (isConfirm) {
-        // Find the last assistant message that contains a pending trade marker
-        const lastAssistant = [...messages].reverse().find((m: any) => m.role === 'assistant');
-        const pendingMatch = lastAssistant?.content?.match(/PENDING_TRADE:(\{[^}]+\})/);
-        if (pendingMatch) {
-          try {
-            const cmd: ParsedCommand = JSON.parse(pendingMatch[1]);
-            tradeResult = await executeTradeCommand(cmd);
-            log.info('Trade confirmed and executed', { executed: tradeResult.executed, symbol: tradeResult.symbol, action: tradeResult.action });
-          } catch {
-            tradeResult = { executed: false, message: 'Failed to parse pending trade. Please try your command again.' };
-          }
-        } else {
-          tradeResult = { executed: false, message: 'No pending trade found to confirm. Please enter your trade command first.' };
-        }
-      } else {
-        const cmd = parseTradeCommand(lastUserMsg.content);
-        if (cmd) {
-          // Don't execute yet — ask for confirmation
-          const ib = createIBClient();
-          const positions = await ib.getPositions().catch(() => []) as any[];
-          const pos = positions.find((p: any) => p.symbol === cmd.symbol && p.position > 0);
-          const qty = cmd.quantity === 'all' ? (pos?.position ?? 'all') : cmd.quantity;
-          const price = cmd.action === 'buy' ? await getLatestPrice(cmd.symbol) : pos?.avg_cost ?? null;
-          const priceStr = price ? ` at ~$${(price as number).toFixed(2)}` : '';
-          const qtyStr = qty === 'all' ? `all ${pos?.position ?? ''} shares` : `${qty} shares`;
-
-          pendingConfirmation = `⚠️ **Confirmation required**\n\nYou want to **${cmd.action.toUpperCase()} ${qtyStr} of ${cmd.symbol}**${priceStr}.\n\nType **confirm** to execute this trade immediately, or ignore this message to cancel.\n\nPENDING_TRADE:${JSON.stringify(cmd)}`;
-          log.info('Trade command pending confirmation', { symbol: cmd.symbol, action: cmd.action, qty });
-        }
+      const cmd = parseTradeCommand(lastUserMsg.content);
+      if (cmd) {
+        tradeResult = await executeTradeCommand(cmd);
+        log.info('Trade command executed', { executed: tradeResult.executed, symbol: tradeResult.symbol, action: tradeResult.action });
       }
     }
 
@@ -404,11 +402,6 @@ You have FULL visibility into all this data below. Use it to provide informed, s
 DO NOT say you don't have access to markets, finance, or tech - you absolutely do!
 ===\n`;
 
-    // Return confirmation prompt immediately — no Ollama call needed
-    if (pendingConfirmation) {
-      return NextResponse.json({ response: pendingConfirmation, trade: null });
-    }
-
     // Inject trade execution result if a command was detected
     let tradeContext = '';
     if (tradeResult) {
@@ -432,8 +425,8 @@ DO NOT say you don't have access to markets, finance, or tech - you absolutely d
     const url = new URL(req.url);
     const useStreaming = url.searchParams.get('stream') === 'true';
 
-    // Connect to local Ollama instance
-    const response = await fetch('http://localhost:11434/api/generate', {
+    const ollamaUrl = process.env.OLLAMA_API_URL || 'http://localhost:11434';
+    const response = await fetch(`${ollamaUrl}/api/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

@@ -24,6 +24,7 @@ import {
   DEFAULT_MIN_CONFIDENCE, DEFAULT_MAX_POSITIONS, DEFAULT_RISK_PER_TRADE,
   DEFAULT_STOP_LOSS_PERCENT, DEFAULT_TAKE_PROFIT_PERCENT, DEFAULT_CHECK_INTERVAL_MS,
   DEFAULT_MAX_DAILY_TRADES, DEFAULT_TRADE_COOLDOWN_HOURS,
+  DEFAULT_TRAILING_ACTIVATION_PERCENT, DEFAULT_TRAILING_STOP_PERCENT,
   ENTRY_LIMIT_SLIPPAGE, TECHNICAL_WEIGHT, AI_WEIGHT, AI_ONLY_MIN_CONFIDENCE,
   AGREEMENT_CONFIDENCE_BOOST, VOLUME_CONFIRMATION_RATIO, BB_BELOW_RSI_MAX,
   BB_ABOVE_RSI_MIN, ELEVATED_VIX_MACD_THRESHOLD, BEARISH_SENTIMENT_CONFIDENCE_PENALTY,
@@ -123,6 +124,9 @@ export interface ActivePosition {
   expectedProfitUSD?: number; // Dollar gain if take-profit fires
   expectedLossUSD?: number;   // Dollar loss if stop-loss fires
   riskRewardRatio?: number;   // expectedProfitUSD / expectedLossUSD
+  // High/low water marks for trailing stop — tracked in memory, reset on restart
+  highestPrice?: number;      // Highest price reached — BUY trailing stop
+  lowestPrice?: number;       // Lowest price reached  — SELL trailing stop
 }
 
 export interface TradingEngineConfig {
@@ -138,6 +142,8 @@ export interface TradingEngineConfig {
   minProfitMargin: number; // Minimum profit margin above fees (e.g., 0.03 = 3%)
   tradeCooldownHours: number; // Hours to wait before re-trading same pair
   maxDailyTrades: number; // Maximum trades per day
+  trailingActivationPercent: number; // Profit % to activate trailing stop (e.g. 0.07 = 7%)
+  trailingStopPercent: number; // Trail distance below highest price (e.g. 0.03 = 3%)
 }
 
 export class TradingEngine {
@@ -168,16 +174,20 @@ export class TradingEngine {
       autoExecute:       config.autoExecute       || false,
       tradingFeePercent: config.tradingFeePercent || 0.0005, // IB ~$0.005/share ≈ 0.05% round-trip
       minProfitMargin:   config.minProfitMargin   || 0.02,   // 2% minimum profit above fees
-      tradeCooldownHours: config.tradeCooldownHours || DEFAULT_TRADE_COOLDOWN_HOURS,
-      maxDailyTrades:    config.maxDailyTrades    || DEFAULT_MAX_DAILY_TRADES,
+      tradeCooldownHours:           config.tradeCooldownHours           || DEFAULT_TRADE_COOLDOWN_HOURS,
+      maxDailyTrades:               config.maxDailyTrades               || DEFAULT_MAX_DAILY_TRADES,
+      trailingActivationPercent:    config.trailingActivationPercent    ?? DEFAULT_TRAILING_ACTIVATION_PERCENT,
+      trailingStopPercent:          config.trailingStopPercent          ?? DEFAULT_TRAILING_STOP_PERCENT,
     };
 
     this.riskManager = createRiskManager({
-      maxPositionSize: this.config.riskPerTrade,
-      stopLossPercent: this.config.stopLossPercent,
-      takeProfitPercent: this.config.takeProfitPercent,
-      maxOpenPositions: this.config.maxPositions,
-      minConfidence: this.config.minConfidence,
+      maxPositionSize:           this.config.riskPerTrade,
+      stopLossPercent:           this.config.stopLossPercent,
+      takeProfitPercent:         this.config.takeProfitPercent,
+      maxOpenPositions:          this.config.maxPositions,
+      minConfidence:             this.config.minConfidence,
+      trailingActivationPercent: this.config.trailingActivationPercent,
+      trailingStopPercent:       this.config.trailingStopPercent,
     });
   }
 
@@ -995,9 +1005,11 @@ export class TradingEngine {
           if (position.type === 'buy') {
             position.pnl        = (currentPrice - position.entryPrice) * position.volume;
             position.pnlPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+            if (!position.highestPrice || currentPrice > position.highestPrice) position.highestPrice = currentPrice;
           } else {
             position.pnl        = (position.entryPrice - currentPrice) * position.volume;
             position.pnlPercent = ((position.entryPrice - currentPrice) / position.entryPrice) * 100;
+            if (!position.lowestPrice || currentPrice < position.lowestPrice) position.lowestPrice = currentPrice;
           }
 
           // Log progress toward profit target if we know it
@@ -1051,9 +1063,77 @@ export class TradingEngine {
             }
 
             this.activePositions.delete(txid);
+          } else {
+            // ── Position still open: ratchet IB stop upward with trailing stop ──
+            // Instead of firing a software market exit, we move the actual IB
+            // stop-loss order up to the trailing floor and replace both exit
+            // orders with a fresh OCA pair. This way the floor survives a bot
+            // restart — IB holds the updated stop on its servers, and the DB
+            // stores the new stopLoss + order IDs for recoverPositions().
+            const profitFrac = position.type === 'buy'
+              ? (position.currentPrice - position.entryPrice) / position.entryPrice
+              : (position.entryPrice - position.currentPrice) / position.entryPrice;
+
+            if (profitFrac >= this.config.trailingActivationPercent) {
+              const highWater    = position.highestPrice ?? position.entryPrice;
+              const lowWater     = position.lowestPrice  ?? position.entryPrice;
+              const newStopPrice = parseFloat(
+                (position.type === 'buy'
+                  ? highWater * (1 - this.config.trailingStopPercent)
+                  : lowWater  * (1 + this.config.trailingStopPercent)
+                ).toFixed(2)
+              );
+
+              // Only ratchet when stop improved by ≥ 0.5% — avoids constant order churn
+              const stopImproved = position.type === 'buy'
+                ? newStopPrice >= position.stopLoss * 1.005
+                : newStopPrice <= position.stopLoss * 0.995;
+
+              if (stopImproved && position.slOrderId) {
+                log.info('Ratcheting trailing stop on IB', { pair: position.pair, oldStop: position.stopLoss.toFixed(2), newStop: newStopPrice.toFixed(2), peak: highWater.toFixed(2) });
+                logActivity.info(`🔼 Trailing stop raised — ${position.pair} | SL: $${position.stopLoss.toFixed(2)} → $${newStopPrice.toFixed(2)} (peak: $${highWater.toFixed(2)})`);
+
+                try {
+                  // Cancel old SL + TP, replace with fresh OCA pair (STP + LMT)
+                  // OCA links both exits: when one fills IB cancels the other
+                  if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
+                  if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
+
+                  const ocaResult = await ib.placeOcaOrder({
+                    symbol:        position.pair,
+                    action:        position.type === 'buy' ? 'SELL' : 'BUY',
+                    quantity:      position.volume,
+                    stop_price:    newStopPrice,
+                    limit_price:   position.takeProfit,
+                    validate_only: false,
+                  });
+
+                  // Update in-memory state
+                  position.stopLoss = newStopPrice;
+                  if (ocaResult.stop_order_id)  position.slOrderId = ocaResult.stop_order_id;
+                  if (ocaResult.limit_order_id) position.tpOrderId = ocaResult.limit_order_id;
+
+                  // Persist to DB — recoverPositions() reloads these on restart
+                  if (position.dbTradeId) {
+                    import('./db').then(({ prisma }) =>
+                      prisma.trade.update({
+                        where: { id: position.dbTradeId },
+                        data: {
+                          stopLoss:  newStopPrice,
+                          slOrderId: ocaResult.stop_order_id  ?? position.slOrderId,
+                          tpOrderId: ocaResult.limit_order_id ?? position.tpOrderId,
+                        },
+                      })
+                    ).catch(e => log.error('DB failed to persist ratcheted trailing stop', { error: String(e) }));
+                  }
+                } catch (e) {
+                  log.error('Failed to ratchet trailing stop on IB', { pair: position.pair, error: String(e) });
+                }
+              }
+            }
           }
         } else {
-          // ── Paper mode: manual SL/TP check (no native orders) ─────────────
+          // ── Paper mode: manual SL/TP + trailing stop check ────────────────
           const shouldClose = this.riskManager.shouldClosePosition({
             pair:         position.pair,
             type:         position.type,
@@ -1062,6 +1142,9 @@ export class TradingEngine {
             stopLoss:     position.stopLoss,
             takeProfit:   position.takeProfit,
             currentPrice: position.currentPrice,
+            highestPrice: position.highestPrice,
+            lowestPrice:  position.lowestPrice,
+            entryTime:    position.timestamp,
           });
 
           if (shouldClose.shouldClose) {

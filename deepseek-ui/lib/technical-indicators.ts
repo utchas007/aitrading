@@ -325,7 +325,7 @@ async function _fetchHistoricalPrices(
   else                      { barSize = '1 day';   duration = '3 M'; }
 
   // Use the OHLC API route which has Yahoo Finance fallback built in
-  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3001';
+  const baseUrl = process.env.NEXTJS_URL || process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3001';
   const params = new URLSearchParams({ symbol, barSize, duration });
 
   try {

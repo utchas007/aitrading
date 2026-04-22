@@ -5,9 +5,10 @@ import { withCorrelation } from '@/lib/correlation';
 
 const IB_SERVICE_URL = process.env.IB_SERVICE_URL || 'http://localhost:8765';
 
-// In-memory cache for OHLC data (refreshes every 60 seconds)
+// In-memory cache for OHLC data
 const ohlcCache: Map<string, { data: any; timestamp: number }> = new Map();
-const CACHE_TTL = 60000; // 60 seconds for OHLC data
+const CACHE_TTL      = 5 * 60_000; // 5 minutes fresh window
+const STALE_CACHE_TTL = 60 * 60_000; // serve stale for up to 1 hour on errors
 
 function getCacheKey(symbol: string, barSize: string, duration: string): string {
   return `${symbol}:${barSize}:${duration}`;
@@ -15,9 +16,13 @@ function getCacheKey(symbol: string, barSize: string, duration: string): string 
 
 function getCachedOHLC(key: string): any | null {
   const cached = ohlcCache.get(key);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.data;
-  }
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.data;
+  return null;
+}
+
+function getStaleCachedOHLC(key: string): any | null {
+  const cached = ohlcCache.get(key);
+  if (cached && Date.now() - cached.timestamp < STALE_CACHE_TTL) return cached.data;
   return null;
 }
 
@@ -26,7 +31,7 @@ function setCachedOHLC(key: string, data: any): void {
 }
 
 // Map barSize+duration to Yahoo Finance interval+range
-function toYahooParams(barSize: string, duration: string): { interval: string; range: string } {
+function toYahooParams(barSize: string): { interval: string; range: string } {
   if (barSize.includes('min') || barSize.includes('secs')) {
     const mins = barSize.includes('1 min') ? 1 : barSize.includes('5') ? 5 : barSize.includes('15') ? 15 : 30;
     if (mins <= 5)  return { interval: '5m',  range: '5d' };
@@ -38,8 +43,8 @@ function toYahooParams(barSize: string, duration: string): { interval: string; r
   return { interval: '1d', range: '1mo' };
 }
 
-async function fetchFromYahoo(symbol: string, barSize: string, duration: string) {
-  const { interval, range } = toYahooParams(barSize, duration);
+async function fetchFromYahoo(symbol: string, barSize: string) {
+  const { interval, range } = toYahooParams(barSize);
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
   const res = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)' },
@@ -104,11 +109,17 @@ export async function GET(req: NextRequest) {
 
     // Fallback: Yahoo Finance (free, no subscription needed)
     try {
-      const bars = await fetchFromYahoo(symbol, barSize, duration);
+      const bars = await fetchFromYahoo(symbol, barSize);
       const response = { success: true, bars, source: 'yahoo' };
       setCachedOHLC(cacheKey, response);
       return NextResponse.json(response);
     } catch (err: any) {
+      // On rate-limit, serve stale cache rather than failing the chart
+      if (err.message?.includes('429')) {
+        const stale = getStaleCachedOHLC(cacheKey);
+        if (stale) return NextResponse.json({ ...stale, stale: true, cached: true });
+        return NextResponse.json({ success: true, bars: [], source: 'rate_limited', stale: true });
+      }
       return apiError(err.message, 'EXTERNAL_API_ERROR');
     }
   });

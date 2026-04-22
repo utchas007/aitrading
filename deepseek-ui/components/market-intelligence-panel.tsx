@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { readJsonSafely } from '@/lib/safe-json';
 
 interface FearGreedData {
   value: number;
@@ -60,13 +61,13 @@ export function MarketIntelligencePanel({ pair = 'AAPL' }: Props) {
     setLoading(true);
     try {
       const res = await fetch(`/api/market-intelligence?pair=${pair}&timeframes=5,15,60,240`);
-      const json = await res.json();
+      const json = await readJsonSafely<any>(res, 'market intelligence');
       if (json.success) {
         setData(json);
         setLastUpdate(new Date());
       }
     } catch (err) {
-      console.error('Failed to fetch market intelligence:', err);
+      console.warn('Failed to fetch market intelligence:', err);
     } finally {
       setLoading(false);
     }

@@ -129,11 +129,15 @@ export async function GET(req: NextRequest) {
 
     const services = { database, ib, ollama, worldmonitor };
 
-    // Overall status: degraded if DB or IB has an error (both are critical)
-    // ollama 'unavailable' is degraded, worldmonitor 'unavailable' is acceptable
+    // Overall status for display purposes
     const criticalOk = database.status === 'ok' && ib.status !== 'error';
     const ollamaOk   = ollama.status === 'ok';
     const overallStatus = criticalOk && ollamaOk ? 'ok' : 'degraded';
+
+    // HTTP status: only fail (503) if the database is down — IB/Ollama being
+    // offline is expected when TWS isn't running, and must not break the
+    // Docker healthcheck which gates other containers starting.
+    const httpStatus = database.status === 'ok' ? 200 : 503;
 
     log.debug('Health check complete', {
       status: overallStatus,
@@ -150,7 +154,7 @@ export async function GET(req: NextRequest) {
         uptime:    process.uptime(),
         version:   process.env.npm_package_version ?? '0.1.0',
       },
-      { status: overallStatus === 'ok' ? 200 : 503 },
+      { status: httpStatus },
     );
   });
 }

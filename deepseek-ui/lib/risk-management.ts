@@ -10,6 +10,8 @@ export interface RiskParameters {
   takeProfitPercent: number; // Take profit % from entry (e.g., 0.10 = 10%)
   maxOpenPositions: number; // Maximum number of concurrent positions
   minConfidence: number; // Minimum AI confidence to execute trade (0-100)
+  trailingActivationPercent: number; // Profit % that activates trailing stop (e.g. 0.07 = 7%)
+  trailingStopPercent: number; // Trail distance below highest price (e.g. 0.03 = 3%)
 }
 
 export interface Position {
@@ -36,12 +38,14 @@ export class RiskManager {
 
   constructor(params: Partial<RiskParameters> = {}) {
     this.params = {
-      maxPositionSize: params.maxPositionSize || 0.1, // 10% default
-      maxPortfolioRisk: params.maxPortfolioRisk || 0.02, // 2% default
-      stopLossPercent: params.stopLossPercent || 0.05, // 5% default
-      takeProfitPercent: params.takeProfitPercent || 0.10, // 10% default
+      maxPositionSize: params.maxPositionSize || 0.1,
+      maxPortfolioRisk: params.maxPortfolioRisk || 0.02,
+      stopLossPercent: params.stopLossPercent || 0.05,
+      takeProfitPercent: params.takeProfitPercent || 0.10,
       maxOpenPositions: params.maxOpenPositions || 6,
-      minConfidence: params.minConfidence || 70, // 70% confidence minimum
+      minConfidence: params.minConfidence || 70,
+      trailingActivationPercent: params.trailingActivationPercent ?? 0.07,
+      trailingStopPercent: params.trailingStopPercent ?? 0.03,
     };
   }
 
@@ -197,9 +201,9 @@ export class RiskManager {
         return { shouldClose: true, reason: 'time-exit', partialClose: profitPercent < targetProfitPercent };
       }
       
-      // Trailing stop: If profit > 15%, set trailing stop at 10% below highest
-      if (profitPercent >= 15) {
-        const trailingStopPrice = highestPrice * 0.90; // 10% below highest
+      // Trailing stop: activates after trailingActivationPercent gain, trails by trailingStopPercent
+      if (profitPercent >= this.params.trailingActivationPercent * 100) {
+        const trailingStopPrice = highestPrice * (1 - this.params.trailingStopPercent);
         if (position.currentPrice <= trailingStopPrice) {
           return { shouldClose: true, reason: 'trailing-stop' };
         }
@@ -233,9 +237,9 @@ export class RiskManager {
         return { shouldClose: true, reason: 'time-exit', partialClose: profitPercent < targetProfitPercent };
       }
 
-      // Trailing stop: if profit >= 15%, exit if price rises 10% above the lowest point
-      if (profitPercent >= 15) {
-        const trailingStopPrice = lowestPrice * 1.10;
+      // Trailing stop: activates after trailingActivationPercent gain, trails by trailingStopPercent
+      if (profitPercent >= this.params.trailingActivationPercent * 100) {
+        const trailingStopPrice = lowestPrice * (1 + this.params.trailingStopPercent);
         if (position.currentPrice >= trailingStopPrice) {
           return { shouldClose: true, reason: 'trailing-stop' };
         }

@@ -44,6 +44,7 @@ export default function TradingDashboard() {
     prices: wsPrices,
     balance: wsBalance,
     positions: wsPositions,
+    orders: wsOrders,
     botStatus: wsBotStatus,
     ibHealth: wsIbHealth,
   } = useWebSocketContext();
@@ -96,10 +97,12 @@ export default function TradingDashboard() {
   }, [wsPrices]);
 
   useEffect(() => {
-    if (wsBalance) {
-      setBalance(wsBalance);
-    }
+    if (wsBalance) setBalance(wsBalance);
   }, [wsBalance]);
+
+  useEffect(() => {
+    if (wsOrders.length > 0 || openOrders.length > 0) setOpenOrders(wsOrders);
+  }, [wsOrders]);
 
   useEffect(() => {
     if (wsIbHealth) {
@@ -276,7 +279,6 @@ export default function TradingDashboard() {
     setCancellingOrderId(orderId);
     try {
       await fetch(`/api/ib/orders?orderId=${orderId}`, { method: 'DELETE' });
-      await fetchOpenOrders();
     } catch (e) {
       addToast('Failed to cancel order', 'error');
     } finally {
@@ -308,11 +310,7 @@ export default function TradingDashboard() {
       fetchMarketData(),
       fetchNews(),
       fetchWorldMonitorStatus(),
-      fetchOpenOrders(),
     ]).finally(() => setIsInitialLoading(false));
-
-    // Refresh open orders every 15 seconds
-    const ordersInterval = setInterval(fetchOpenOrders, 15000);
 
     // Refresh news and World Monitor status every 60 seconds
     const newsInterval = setInterval(() => {
@@ -321,7 +319,6 @@ export default function TradingDashboard() {
     }, 60000);
 
     return () => {
-      clearInterval(ordersInterval);
       clearInterval(newsInterval);
     };
   }, []);
@@ -653,9 +650,19 @@ export default function TradingDashboard() {
                 </div>
 
                 {/* Open Orders */}
-                {openOrders.length > 0 && (
-                  <div style={{ marginTop: 20 }}>
-                    <div style={{ fontSize: 12, color: '#666', marginBottom: 12 }}>OPEN ORDERS</div>
+                <div style={{ marginTop: 20 }}>
+                  <div style={{ fontSize: 12, color: '#666', marginBottom: 12 }}>OPEN ORDERS</div>
+                  {openOrders.length === 0 ? (
+                    <div style={{
+                      padding: '16px 12px',
+                      background: '#0d0d1e',
+                      borderRadius: 8,
+                      border: '1px solid #1a1a2e',
+                      fontSize: 12,
+                      color: '#444',
+                      textAlign: 'center',
+                    }}>No open orders</div>
+                  ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {openOrders.map(order => (
                         <div key={order.order_id} style={{
@@ -707,8 +714,8 @@ export default function TradingDashboard() {
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
 
                 {/* Open Positions */}
                 {wsPositions && wsPositions.length > 0 && (

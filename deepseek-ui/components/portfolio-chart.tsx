@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
+import { readJsonSafely } from '@/lib/safe-json';
 
 interface PortfolioChartProps {
   height?: number;
@@ -30,7 +31,7 @@ export default function PortfolioChart({ height = 300 }: PortfolioChartProps) {
       setError(null);
 
       const res = await fetch('/api/portfolio/history?stats=true');
-      const data = await res.json();
+      const data = await readJsonSafely<any>(res, 'portfolio history');
 
       if (!data.success) {
         throw new Error(data.error || 'Failed to fetch portfolio history');

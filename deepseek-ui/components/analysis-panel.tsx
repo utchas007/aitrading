@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { readJsonSafely } from "@/lib/safe-json";
 
 interface Activity {
   id: string;
@@ -30,7 +31,7 @@ export default function AnalysisPanel() {
     const fetchActivities = async () => {
       try {
         const res = await fetch('/api/trading/engine');
-        const data = await res.json();
+        const data = await readJsonSafely<any>(res, 'trading engine');
         
         if (data.success) {
           // Update trading mode status
@@ -109,7 +110,7 @@ export default function AnalysisPanel() {
           }
         }
       } catch (error) {
-        console.error('Failed to fetch activities:', error);
+        console.warn('Failed to fetch activities:', error);
       }
     };
 
