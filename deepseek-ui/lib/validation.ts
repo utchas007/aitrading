@@ -160,9 +160,9 @@ export const tradingAnalysisSchema = z.object({
     .max(50, 'Too many news items (max 50)'),
   marketData: z.record(
     z.object({
-      price:     z.string(),
-      volume:    z.string(),
-      change24h: z.string().optional(),
+      price:     z.coerce.string(),
+      volume:    z.coerce.string(),
+      change24h: z.coerce.string().optional(),
     }),
   ),
   assetType:    z.enum(['crypto', 'stock']).optional(),

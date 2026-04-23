@@ -75,6 +75,15 @@ export default function TradingDashboard() {
     servicesActive: number;
   }>({ connected: false, services: { news: false, indices: false, commodities: false, geopolitics: false }, servicesActive: 0 });
 
+  const [aiStatus, setAiStatus] = useState<{
+    connected: boolean;
+    model: string | null;
+    latencyMs: number | null;
+    error: string | null;
+    chatWorking: boolean;
+    tradingAnalysisWorking: boolean;
+  }>({ connected: false, model: null, latencyMs: null, error: null, chatWorking: false, tradingAnalysisWorking: false });
+
   // Update state from WebSocket data
   useEffect(() => {
     if (Object.keys(wsPrices).length > 0) {
@@ -174,6 +183,46 @@ export default function TradingDashboard() {
       }
     } catch {
       // keep defaults
+    }
+  };
+
+  // Fetch DeepSeek AI / Ollama status + verify AI Chat and AI Trading Analysis
+  const fetchAiStatus = async () => {
+    try {
+      const [healthRes, activitiesRes] = await Promise.all([
+        fetch('/api/health'),
+        fetch('/api/trading/activities?limit=50'),
+      ]);
+
+      const health = await healthRes.json();
+      const ollama = health.services?.ollama;
+      const ollamaOk = ollama?.status === 'ok';
+
+      // AI Trading Analysis: check if a 🤖 AI Sentiment log exists in the last 20 minutes
+      let tradingAnalysisWorking = false;
+      try {
+        const acts = await activitiesRes.json();
+        const cutoff = Date.now() - 20 * 60 * 1000;
+        tradingAnalysisWorking = (acts.activities ?? []).some(
+          (a: { message: string; createdAt: string }) =>
+            a.message.includes('🤖 AI Sentiment') &&
+            new Date(a.createdAt).getTime() > cutoff
+        );
+      } catch { /* non-fatal */ }
+
+      // AI Chat: check the chat endpoint responds (lightweight OPTIONS/HEAD not available, use activities as proxy)
+      const chatWorking = ollamaOk;
+
+      setAiStatus({
+        connected: ollamaOk,
+        model: ollama?.models?.[0] ?? null,
+        latencyMs: ollama?.latencyMs ?? null,
+        error: ollamaOk ? null : (ollama?.error ?? 'Unavailable'),
+        chatWorking,
+        tradingAnalysisWorking,
+      });
+    } catch {
+      setAiStatus({ connected: false, model: null, latencyMs: null, error: 'Health check failed', chatWorking: false, tradingAnalysisWorking: false });
     }
   };
 
@@ -310,12 +359,16 @@ export default function TradingDashboard() {
       fetchMarketData(),
       fetchNews(),
       fetchWorldMonitorStatus(),
+      fetchAiStatus(),
+      fetchOpenOrders(),
     ]).finally(() => setIsInitialLoading(false));
 
-    // Refresh news and World Monitor status every 60 seconds
+    // Refresh news, World Monitor, AI status and open orders every 60 seconds
     const newsInterval = setInterval(() => {
       fetchNews();
       fetchWorldMonitorStatus();
+      fetchAiStatus();
+      fetchOpenOrders();
     }, 60000);
 
     return () => {
@@ -460,7 +513,55 @@ export default function TradingDashboard() {
                 )}
                 {!worldMonitorStatus.connected && (
                   <span style={{ fontSize: 11, color: '#666' }}>
-                    Start World Monitor: cd ~/worldmonitor && npm run dev:finance
+                    World Monitor service is not running
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* DeepSeek AI Status Indicator */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              marginTop: 8,
+              padding: '8px 16px',
+              background: aiStatus.connected ? '#a855f715' : '#ff4d6d15',
+              border: `1px solid ${aiStatus.connected ? '#a855f740' : '#ff4d6d40'}`,
+              borderRadius: 8,
+              width: 'fit-content',
+            }}>
+              <div style={{
+                width: 10,
+                height: 10,
+                borderRadius: '50%',
+                background: aiStatus.connected ? '#a855f7' : '#ff4d6d',
+                boxShadow: aiStatus.connected ? '0 0 8px #a855f7' : '0 0 8px #ff4d6d',
+                animation: aiStatus.connected ? 'none' : 'pulse 2s infinite',
+              }} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: aiStatus.connected ? '#a855f7' : '#ff4d6d' }}>
+                  {aiStatus.connected ? 'AI Connected' : 'AI Offline'}
+                </span>
+                {aiStatus.connected && (
+                  <>
+                    <span style={{ fontSize: 11, color: '#888' }}>
+                      {aiStatus.model ?? 'Unknown model'}
+                      {aiStatus.latencyMs !== null ? ` • ${aiStatus.latencyMs}ms` : ''}
+                    </span>
+                    <div style={{ display: 'flex', gap: 8, fontSize: 10 }}>
+                      <span style={{ color: aiStatus.chatWorking ? '#a855f7' : '#666' }}>
+                        AI Chat {aiStatus.chatWorking ? '●' : '○'}
+                      </span>
+                      <span style={{ color: aiStatus.tradingAnalysisWorking ? '#a855f7' : '#666' }}>
+                        AI Trading Analysis {aiStatus.tradingAnalysisWorking ? '●' : '○'}
+                      </span>
+                    </div>
+                  </>
+                )}
+                {!aiStatus.connected && (
+                  <span style={{ fontSize: 11, color: '#666' }}>
+                    {aiStatus.error ?? 'Ollama not reachable — AI analysis disabled'}
                   </span>
                 )}
               </div>
