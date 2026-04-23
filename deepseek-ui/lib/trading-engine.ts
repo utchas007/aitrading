@@ -1181,6 +1181,7 @@ export class TradingEngine {
                           volume:    remainingShares,
                           slOrderId: position.slOrderId ?? null,
                           tpOrderId: position.tpOrderId ?? null,
+                          closeTxid: 'partial_taken', // flag survives restart — recoverPositions() reads this
                         },
                       })
                     ).catch(e => log.error('DB failed to update partial profit', { error: String(e) }));
@@ -1312,7 +1313,7 @@ export class TradingEngine {
         select: {
           id: true, pair: true, type: true, entryPrice: true, volume: true,
           stopLoss: true, takeProfit: true, txid: true, createdAt: true,
-          slOrderId: true, tpOrderId: true,
+          slOrderId: true, tpOrderId: true, closeTxid: true,
           expectedProfitUSD: true, expectedLossUSD: true, riskRewardRatio: true,
         },
       });
@@ -1359,6 +1360,7 @@ export class TradingEngine {
             expectedProfitUSD: t.expectedProfitUSD ?? undefined,
             expectedLossUSD:   t.expectedLossUSD   ?? undefined,
             riskRewardRatio:   t.riskRewardRatio   ?? undefined,
+            partialTaken:      t.closeTxid === 'partial_taken',
           });
           recovered++;
           const slInfo     = t.slOrderId         ? ` | SL order #${t.slOrderId}` : '';
