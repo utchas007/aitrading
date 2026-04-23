@@ -25,10 +25,11 @@ import {
   DEFAULT_STOP_LOSS_PERCENT, DEFAULT_TAKE_PROFIT_PERCENT, DEFAULT_CHECK_INTERVAL_MS,
   DEFAULT_MAX_DAILY_TRADES, DEFAULT_TRADE_COOLDOWN_HOURS,
   DEFAULT_PARTIAL_PROFIT_PERCENT, DEFAULT_TRAILING_ACTIVATION_PERCENT, DEFAULT_TRAILING_STOP_PERCENT,
+  DEFAULT_MAX_DAILY_LOSS_PERCENT, DEFAULT_MAX_POSITIONS_PER_SECTOR,
   ENTRY_LIMIT_SLIPPAGE, TECHNICAL_WEIGHT, AI_WEIGHT, AI_ONLY_MIN_CONFIDENCE,
   AGREEMENT_CONFIDENCE_BOOST, VOLUME_CONFIRMATION_RATIO, BB_BELOW_RSI_MAX,
   BB_ABOVE_RSI_MIN, ELEVATED_VIX_MACD_THRESHOLD, BEARISH_SENTIMENT_CONFIDENCE_PENALTY,
-  MAX_IB_FAILURE_COUNT,
+  MAX_IB_FAILURE_COUNT, SECTOR_MAP, RATCHET_MIN_INTERVAL_MS,
 } from './constants';
 
 // Async DB write — persist OHLCV candles, fire and forget, never blocks the bot
@@ -130,6 +131,8 @@ export interface ActivePosition {
   // Partial profit tracking
   partialTaken?: boolean;     // True once 50% has been sold at the partial target
   partialPnl?: number;        // Realized P&L from the partial exit
+  // Ratchet cooldown — prevents duplicate OCA orders from rapid consecutive ratchets
+  lastRatchetAt?: number;     // Timestamp of last successful trailing-stop ratchet
 }
 
 export interface TradingEngineConfig {
@@ -148,6 +151,8 @@ export interface TradingEngineConfig {
   partialProfitPercent: number; // Profit % to sell half the position (e.g. 0.05 = 5%)
   trailingActivationPercent: number; // Profit % to activate trailing stop (e.g. 0.07 = 7%)
   trailingStopPercent: number; // Trail distance below highest price (e.g. 0.03 = 3%)
+  maxDailyLossPercent: number; // Stop new trades if today's realized P&L < -(this × account value)
+  maxPositionsPerSector: number; // Max concurrent open positions in same sector
 }
 
 export class TradingEngine {
@@ -161,6 +166,8 @@ export class TradingEngine {
   private activePositions: Map<string, ActivePosition> = new Map();
   private lastTradeTime: Map<string, number> = new Map(); // Track last trade time per pair
   private dailyTradeCount: number = 0;
+  private dailyRealizedPnl: number = 0;   // Cumulative realized P&L today (USD)
+  private dailyAccountValue: number = 100_000; // Latest net liquidation — updated each cycle
   private lastResetDate: string = new Date().toDateString();
   private preOpenPrepDone: string = ''; // Date string of last pre-open prep (once per day)
   private lastHeartbeatAt: number = 0;   // Timestamp of last successful cycle
@@ -183,6 +190,8 @@ export class TradingEngine {
       partialProfitPercent:         config.partialProfitPercent         ?? DEFAULT_PARTIAL_PROFIT_PERCENT,
       trailingActivationPercent:    config.trailingActivationPercent    ?? DEFAULT_TRAILING_ACTIVATION_PERCENT,
       trailingStopPercent:          config.trailingStopPercent          ?? DEFAULT_TRAILING_STOP_PERCENT,
+      maxDailyLossPercent:          config.maxDailyLossPercent          ?? DEFAULT_MAX_DAILY_LOSS_PERCENT,
+      maxPositionsPerSector:        config.maxPositionsPerSector        ?? DEFAULT_MAX_POSITIONS_PER_SECTOR,
     };
 
     this.riskManager = createRiskManager({
@@ -352,11 +361,25 @@ export class TradingEngine {
         const cashKey = Object.keys(balance).find(k => k.startsWith('AvailableFunds_'));
         if (cashKey) availableCash = parseFloat(balance[cashKey]);
         logActivity.info(`💵 Available cash: $${availableCash.toLocaleString()}`);
-        // Balance drop alerting
+        // Balance drop alerting + daily account value for drawdown %
         const netLiqKey = Object.keys(balance).find(k => k.startsWith('NetLiquidation_'));
-        if (netLiqKey) void checkBalanceDrop(parseFloat(balance[netLiqKey]));
-  } catch {
+        if (netLiqKey) {
+          this.dailyAccountValue = parseFloat(balance[netLiqKey]);
+          void checkBalanceDrop(this.dailyAccountValue);
+        }
+      } catch {
         logActivity.warning('Could not fetch IB balance — using $10,000 fallback for position sizing');
+      }
+
+      // Daily drawdown guard — stop new signals if today's losses exceed the limit
+      const dailyLossLimit = this.config.maxDailyLossPercent * this.dailyAccountValue;
+      if (this.dailyRealizedPnl < -dailyLossLimit) {
+        logActivity.warning(
+          `🚫 Daily drawdown limit hit — today's P&L: $${this.dailyRealizedPnl.toFixed(2)} | ` +
+          `Limit: -$${dailyLossLimit.toFixed(2)} (${(this.config.maxDailyLossPercent * 100).toFixed(1)}% of $${this.dailyAccountValue.toLocaleString()}) | ` +
+          `No new trades until tomorrow`
+        );
+        return;
       }
 
       // Check each trading pair — 12s delay between analysis cycles to respect IB OHLC pacing
@@ -781,8 +804,9 @@ export class TradingEngine {
     const today = new Date().toDateString();
     if (today !== this.lastResetDate) {
       this.dailyTradeCount = 0;
+      this.dailyRealizedPnl = 0;
       this.lastResetDate = today;
-      logActivity.info(`📅 New trading day started. Daily trade count reset.`);
+      logActivity.info(`📅 New trading day started. Daily counters reset.`);
     }
   }
 
@@ -799,6 +823,17 @@ export class TradingEngine {
       return {
         allowed: false,
         reason: `Daily trade limit reached (${this.config.maxDailyTrades} trades/day)`,
+      };
+    }
+
+    // Sector concentration cap — avoid stacking correlated names
+    const sector = SECTOR_MAP[signal.pair] ?? 'other';
+    const sectorCount = Array.from(this.activePositions.values())
+      .filter(p => (SECTOR_MAP[p.pair] ?? 'other') === sector).length;
+    if (sectorCount >= this.config.maxPositionsPerSector) {
+      return {
+        allowed: false,
+        reason: `Sector cap (${sector}): ${sectorCount}/${this.config.maxPositionsPerSector} positions already open`,
       };
     }
 
@@ -1097,6 +1132,8 @@ export class TradingEngine {
               position.pair,
             );
 
+            this.dailyRealizedPnl += totalPnl;
+
             if (position.dbTradeId) {
               import('./db').then(({ prisma }) =>
                 prisma.trade.update({
@@ -1228,15 +1265,22 @@ export class TradingEngine {
                 ? newStopPrice >= position.stopLoss * 1.005
                 : newStopPrice <= position.stopLoss * 0.995;
 
-              if (stopImproved && position.slOrderId) {
+              // Skip ratchet if we already ratcheted within the last minute — prevents
+              // duplicate OCA orders if two consecutive 30s cycles both see stopImproved
+              const ratchetReady = !position.lastRatchetAt ||
+                (Date.now() - position.lastRatchetAt) >= RATCHET_MIN_INTERVAL_MS;
+
+              if (stopImproved && position.slOrderId && ratchetReady) {
                 log.info('Ratcheting trailing stop on IB', { pair: position.pair, oldStop: position.stopLoss.toFixed(2), newStop: newStopPrice.toFixed(2), peak: highWater.toFixed(2) });
                 logActivity.info(`🔼 Trailing stop raised — ${position.pair} | SL: $${position.stopLoss.toFixed(2)} → $${newStopPrice.toFixed(2)} (peak: $${highWater.toFixed(2)})`);
 
                 try {
-                  // Cancel old SL + TP, replace with fresh OCA pair (STP + LMT)
-                  // OCA links both exits: when one fills IB cancels the other
-                  if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
-                  if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
+                  // Cancel SL first — if this fails we abort to avoid duplicate stops on IB
+                  if (position.slOrderId) await ib.cancelOrder(position.slOrderId);
+                  // Cancel TP best-effort — new OCA will include a fresh TP anyway
+                  if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(e =>
+                    log.warn('TP cancel failed during ratchet — placing fresh TP anyway', { pair: position.pair, error: String(e) })
+                  );
 
                   const ocaResult = await ib.placeOcaOrder({
                     symbol:        position.pair,
@@ -1248,7 +1292,8 @@ export class TradingEngine {
                   });
 
                   // Update in-memory state
-                  position.stopLoss = newStopPrice;
+                  position.stopLoss     = newStopPrice;
+                  position.lastRatchetAt = Date.now();
                   if (ocaResult.stop_order_id)  position.slOrderId = ocaResult.stop_order_id;
                   if (ocaResult.limit_order_id) position.tpOrderId = ocaResult.limit_order_id;
 
@@ -1266,7 +1311,8 @@ export class TradingEngine {
                     ).catch(e => log.error('DB failed to persist ratcheted trailing stop', { error: String(e) }));
                   }
                 } catch (e) {
-                  log.error('Failed to ratchet trailing stop on IB', { pair: position.pair, error: String(e) });
+                  // SL cancel threw — position still protected by old stop, skip this cycle
+                  log.warn('Ratchet aborted — old SL still active on IB', { pair: position.pair, error: String(e) });
                 }
               }
             }
@@ -1287,6 +1333,7 @@ export class TradingEngine {
           });
 
           if (shouldClose.shouldClose) {
+            this.dailyRealizedPnl += position.pnl;
             log.info('Paper position closed', { pair: position.pair, reason: shouldClose.reason, entry: position.entryPrice.toFixed(2), current: position.currentPrice.toFixed(2), pnl: position.pnl.toFixed(2) });
             logActivity.completed(`✅ Paper position closed — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${shouldClose.reason}`);
             this.activePositions.delete(txid);

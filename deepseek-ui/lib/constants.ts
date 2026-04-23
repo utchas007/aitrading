@@ -145,3 +145,62 @@ export const ACTIVITY_LOG_RETENTION_DAYS = 90;
 
 /** Number of consecutive IB health check failures before the engine stops. */
 export const MAX_IB_FAILURE_COUNT = 3;
+
+// ─── Daily drawdown limit ─────────────────────────────────────────────────────
+
+/** Stop opening new positions if today's realized P&L drops below this fraction of account value. */
+export const DEFAULT_MAX_DAILY_LOSS_PERCENT = 0.02; // 2%
+
+// ─── Sector / correlation cap ─────────────────────────────────────────────────
+
+/** Maximum concurrent open positions in the same sector. */
+export const DEFAULT_MAX_POSITIONS_PER_SECTOR = 2;
+
+/**
+ * Maps each trading symbol to a sector label.
+ * Symbols not listed here fall into the catch-all 'other' bucket.
+ */
+export const SECTOR_MAP: Record<string, string> = {
+  // Large-cap tech platforms
+  AAPL:  'mega_tech',
+  MSFT:  'mega_tech',
+  GOOGL: 'mega_tech',
+  GOOG:  'mega_tech',
+  AMZN:  'mega_tech',
+  META:  'mega_tech',
+  // Semiconductors
+  NVDA:  'semiconductors',
+  AMD:   'semiconductors',
+  INTC:  'semiconductors',
+  QCOM:  'semiconductors',
+  // EV / auto
+  TSLA:  'ev_auto',
+  RIVN:  'ev_auto',
+  // Financials
+  JPM:   'financials',
+  BAC:   'financials',
+  GS:    'financials',
+  // Healthcare
+  JNJ:   'healthcare',
+  PFE:   'healthcare',
+  UNH:   'healthcare',
+  // Energy
+  XOM:   'energy',
+  CVX:   'energy',
+  // ETFs / index
+  SPY:   'etf_index',
+  QQQ:   'etf_index',
+  IWM:   'etf_index',
+  // Commodities
+  GLD:   'commodities',
+  SLV:   'commodities',
+  USO:   'commodities',
+  // Bonds
+  TLT:   'bonds',
+  IEF:   'bonds',
+};
+
+// ─── OCA ratchet robustness ───────────────────────────────────────────────────
+
+/** Minimum time (ms) between consecutive trailing-stop ratchets for the same position. */
+export const RATCHET_MIN_INTERVAL_MS = 60_000; // 1 minute

@@ -9,8 +9,9 @@ import StockSelector from "@/components/stock-selector";
 import NotificationBell from "@/components/notification-bell";
 import { WorldMonitorPanel } from "@/components/worldmonitor-panel";
 import PnLAnalytics from "@/components/pnl-analytics";
+import BacktestPanel from "@/components/backtest-panel";
 
-type View = 'chat' | 'trading' | 'crypto' | 'stocks' | 'worldmonitor' | 'analytics';
+type View = 'chat' | 'trading' | 'crypto' | 'stocks' | 'worldmonitor' | 'analytics' | 'backtest';
 
 const NAV_ITEMS: { id: View; label: string }[] = [
   { id: 'chat',         label: '💬 AI Chat' },
@@ -122,26 +123,29 @@ export default function Home() {
             scrollbarWidth: 'thin',
             minWidth: 0,
           }}>
-            <button
-              className="nav-btn"
-              onClick={() => setView('analytics')}
-              style={{
-                padding: '8px 16px',
-                borderRadius: 8,
-                border: '1px solid',
-                borderColor: view === 'analytics' ? '#00ff9f' : '#2a2a4a',
-                background: view === 'analytics' ? '#00ff9f22' : 'transparent',
-                color: view === 'analytics' ? '#00ff9f' : '#888',
-                cursor: 'pointer',
-                fontSize: 12,
-                fontWeight: 600,
-                transition: 'all 0.2s',
-                whiteSpace: 'nowrap',
-                flexShrink: 0,
-              }}
-            >
-              📊 Analytics
-            </button>
+            {(['analytics', 'backtest'] as const).map(id => (
+              <button
+                key={id}
+                className="nav-btn"
+                onClick={() => setView(id)}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: 8,
+                  border: '1px solid',
+                  borderColor: view === id ? '#00ff9f' : '#2a2a4a',
+                  background: view === id ? '#00ff9f22' : 'transparent',
+                  color: view === id ? '#00ff9f' : '#888',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  transition: 'all 0.2s',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                }}
+              >
+                {id === 'analytics' ? '📊 Analytics' : '🧪 Backtest'}
+              </button>
+            ))}
             {NAV_ITEMS.map(({ id, label }) => (
               <button
                 key={id}
@@ -178,7 +182,8 @@ export default function Home() {
           <div style={{ display: view === 'crypto'       ? 'block' : 'none' }}><CryptoSelector /></div>
           <div style={{ display: view === 'stocks'       ? 'block' : 'none' }}><StockSelector /></div>
           <div style={{ display: view === 'worldmonitor' ? 'block' : 'none' }}><WorldMonitorPanel /></div>
-          <div style={{ display: view === 'analytics'   ? 'block' : 'none' }}><PnLAnalytics /></div>
+          <div style={{ display: view === 'analytics'  ? 'block' : 'none' }}><PnLAnalytics /></div>
+          <div style={{ display: view === 'backtest'   ? 'block' : 'none' }}><BacktestPanel /></div>
         </div>
 
         {/* Activity Feed Sidebar */}
