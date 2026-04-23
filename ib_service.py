@@ -373,6 +373,8 @@ class BracketOrderRequest(BaseModel):
     stop_loss_price: float             # Stop price for the STP child order
     take_profit_price: float           # Limit price for the LMT child order
     limit_price: Optional[float] = None  # If set, entry is LMT order; otherwise MKT
+    outside_rth: bool = False          # Allow trading outside regular trading hours
+    overnight: bool = False            # Route to OVERNIGHT exchange (8 PM–3:50 AM ET)
     validate_only: bool = True         # SAFETY: True = dry-run by default
 
 
@@ -662,37 +664,57 @@ async def place_bracket_order(req: BracketOrderRequest):
     reverse_action = "SELL" if action == "BUY" else "BUY"
 
     async def _execute():
-        contract = await _get_contract(req.symbol, req.sec_type, req.exchange, req.currency)
+        # Route to OVERNIGHT exchange for the overnight session (8 PM–3:50 AM ET)
+        exchange = "OVERNIGHT" if req.overnight else req.exchange
+        contract = await _get_contract(req.symbol, req.sec_type, exchange, req.currency)
         if contract is None:
             return None
 
+        use_outside_rth = req.outside_rth or req.overnight
+
         if req.validate_only:
-            # For dry-run: validate only the parent market order
-            parent = MarketOrder(action, req.quantity)
+            # For dry-run: use limit order if provided, else market order
+            if req.limit_price is not None:
+                parent = LimitOrder(action, req.quantity, round(req.limit_price, 2))
+            else:
+                parent = MarketOrder(action, req.quantity)
+            if use_outside_rth:
+                parent.outsideRth = True
             parent.whatIf = True
             what_if = await ib.whatIfOrderAsync(contract, parent)
             return {"what_if": what_if, "validate_only": True}
 
-        # Build the 3-order bracket using IB-assigned order IDs
-        # Use limit order for entry if limit_price provided (protects against gap risk)
+        # Build the 3-order bracket using IB-assigned order IDs.
+        # Overnight requires limit orders — market orders are not supported outside RTH.
         if req.limit_price is not None:
             parent = LimitOrder(action, req.quantity, round(req.limit_price, 2))
+        elif req.overnight:
+            raise HTTPException(
+                status_code=400,
+                detail="Overnight orders require limit_price (market orders not supported outside RTH)",
+            )
         else:
             parent = MarketOrder(action, req.quantity)
         parent.orderId = ib.client.getReqId()
         parent.transmit = False  # hold — don't send to exchange until all 3 are placed
+        if use_outside_rth:
+            parent.outsideRth = True
 
         take_profit = LimitOrder(reverse_action, req.quantity, round(req.take_profit_price, 2))
         take_profit.orderId = ib.client.getReqId()
         take_profit.parentId = parent.orderId
         take_profit.tif = "GTC"   # persist across sessions — don't expire at day end
         take_profit.transmit = False
+        if use_outside_rth:
+            take_profit.outsideRth = True
 
         stop_loss = StopOrder(reverse_action, req.quantity, round(req.stop_loss_price, 2))
         stop_loss.orderId = ib.client.getReqId()
         stop_loss.parentId = parent.orderId
         stop_loss.tif = "GTC"     # persist across sessions — don't expire at day end
         stop_loss.transmit = True  # transmitting this one sends all 3 together
+        if use_outside_rth:
+            stop_loss.outsideRth = True
 
         parent_trade = ib.placeOrder(contract, parent)
         tp_trade = ib.placeOrder(contract, take_profit)

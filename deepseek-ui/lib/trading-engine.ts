@@ -283,11 +283,11 @@ export class TradingEngine {
    */
   private async checkMarkets(): Promise<void> {
     const session = getMarketSession();
-    if (!session.isOpen) {
+    if (!session.isOpen && !session.isExtendedHours) {
+      // Market fully closed — run pre-open prep near open, otherwise skip
       const mins = Math.round(session.nextOpenMs / 60000);
       const wait = mins > 60 ? `${Math.round(mins / 60)}h` : `${mins}m`;
       const todayStr = new Date().toDateString();
-      // Run pre-open prep once per day, only within 30 minutes of open
       if (mins <= 30 && this.preOpenPrepDone !== todayStr) {
         logActivity.info(`📚 Market opens in ${mins}m — running pre-open prep...`);
         await this.gatherOffHoursData();
@@ -296,6 +296,16 @@ export class TradingEngine {
         log.debug('Market closed, skipping cycle', { session: session.session, nextOpenIn: wait });
       }
       return;
+    }
+
+    // Skip during the 3:50–4:00 AM break between overnight and pre-market
+    if (session.isBreak) {
+      log.debug('Break window (3:50–4:00 AM ET), skipping cycle');
+      return;
+    }
+
+    if (session.isExtendedHours) {
+      logActivity.info(`⏰ Extended hours trading active — ${session.session}`);
     }
 
     // Skip signal generation during noisy open/close windows
@@ -925,6 +935,11 @@ export class TradingEngine {
           ? parseFloat((signal.entryPrice * (1 + limitSlippage)).toFixed(2))
           : parseFloat((signal.entryPrice * (1 - limitSlippage)).toFixed(2));
 
+        const tradeSession = getMarketSession();
+        if (tradeSession.isExtendedHours) {
+          logActivity.info(`🌙 Extended hours order — session: ${tradeSession.session} | venue: ${tradeSession.ibSessionVenue}`);
+        }
+
         const bracket = await ib.placeBracketOrder({
           symbol:           signal.pair,
           action:           signal.action === 'buy' ? 'BUY' : 'SELL',
@@ -932,6 +947,8 @@ export class TradingEngine {
           stop_loss_price:  signal.stopLoss,
           take_profit_price: signal.takeProfit,
           limit_price:      entryLimit,
+          outside_rth:      tradeSession.isExtendedHours,
+          overnight:        tradeSession.isOvernight,
           validate_only:    false,
         });
 

@@ -99,7 +99,9 @@ export interface PlaceBracketOrderRequest {
   quantity: number;
   stop_loss_price: number;
   take_profit_price: number;
-  limit_price?: number; // If set, entry uses LMT order to avoid gap risk
+  limit_price?: number;       // If set, entry uses LMT order to avoid gap risk
+  outside_rth?: boolean;      // Allow trading outside regular trading hours
+  overnight?: boolean;        // Route to OVERNIGHT exchange (8 PM–3:50 AM ET)
   validate_only?: boolean;
 }
 

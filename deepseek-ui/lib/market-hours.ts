@@ -111,13 +111,17 @@ function isNYSEHoliday(etDate: Date): boolean {
 // ─── Market Session ───────────────────────────────────────────────────────────
 
 export interface MarketSession {
-  isOpen: boolean;        // Regular trading hours only
+  isOpen: boolean;             // Regular trading hours only (9:30 AM–4:00 PM ET)
   isWeekend: boolean;
   isHoliday: boolean;
-  isPreMarket: boolean;
-  isAfterHours: boolean;
-  session: string;        // Human-readable label
-  nextOpenMs: number;     // Ms until next regular session open (0 if already open)
+  isPreMarket: boolean;        // 4:00–9:30 AM ET
+  isAfterHours: boolean;       // 4:00–8:00 PM ET
+  isOvernight: boolean;        // 8:00 PM–3:50 AM ET (weeknights only)
+  isBreak: boolean;            // 3:50–4:00 AM ET (gap between overnight and pre-market)
+  isExtendedHours: boolean;    // true when preMarket | afterHours | overnight
+  ibSessionVenue: 'SMART' | 'OVERNIGHT'; // IB exchange routing for orders
+  session: string;             // Human-readable label
+  nextOpenMs: number;          // Ms until next regular session open (0 if already open)
 }
 
 export function getMarketSession(): MarketSession {
@@ -135,12 +139,33 @@ export function getMarketSession(): MarketSession {
   const isOpen       = !closed && (etHour > 9 || (etHour === 9 && etMin >= 30)) && etHour < 16;
   const isAfterHours = !closed && etHour >= 16 && etHour < 20;
 
+  // Overnight session: 8:00 PM – 3:50 AM ET (weeknights only).
+  // Evening block (8 PM–midnight): today is Sun–Thu, not a holiday, and tomorrow is not a holiday.
+  // Morning block (midnight–3:50 AM): today is Mon–Fri, not a holiday, and yesterday is not a holiday.
+  const nextDay = new Date(etNow.getFullYear(), etNow.getMonth(), etNow.getDate() + 1);
+  const nextDayHoliday = nextDay.getDay() === 0 || nextDay.getDay() === 6 || isNYSEHoliday(nextDay);
+  const prevDay = new Date(etNow.getFullYear(), etNow.getMonth(), etNow.getDate() - 1);
+  const prevDayHoliday = prevDay.getDay() === 0 || prevDay.getDay() === 6 || isNYSEHoliday(prevDay);
+
+  const isEveningOvernight =
+    etHour >= 20 && [0, 1, 2, 3, 4].includes(etDay) && !isHoliday && !nextDayHoliday;
+  const isMorningOvernightTime = etHour < 3 || (etHour === 3 && etMin < 50);
+  const isBreakTime            = etHour === 3 && etMin >= 50;
+  const morningValid           = [1, 2, 3, 4, 5].includes(etDay) && !isHoliday && !prevDayHoliday;
+
+  const isOvernight      = isEveningOvernight || (isMorningOvernightTime && morningValid);
+  const isBreak          = isBreakTime && morningValid;
+  const isExtendedHours  = isPreMarket || isAfterHours || isOvernight;
+  const ibSessionVenue: 'SMART' | 'OVERNIGHT' = isOvernight ? 'OVERNIGHT' : 'SMART';
+
   let session: string;
   if (isWeekend)        session = 'Weekend (market closed)';
   else if (isHoliday)   session = 'NYSE Holiday (market closed)';
   else if (isPreMarket) session = 'Pre-market (4:00–9:30 AM ET)';
   else if (isOpen)      session = 'Regular hours (9:30 AM–4:00 PM ET)';
   else if (isAfterHours)session = 'After-hours (4:00–8:00 PM ET)';
+  else if (isOvernight) session = 'Overnight (8:00 PM–3:50 AM ET)';
+  else if (isBreak)     session = 'Break (3:50–4:00 AM ET)';
   else                  session = 'Market closed';
 
   // Calculate ms until next regular open (9:30 AM ET on next trading day)
@@ -148,11 +173,12 @@ export function getMarketSession(): MarketSession {
   if (!isOpen) {
     const nextOpen = new Date(etNow.getFullYear(), etNow.getMonth(), etNow.getDate());
 
-    if (isPreMarket) {
-      // Same day at 9:30 AM
+    // Same-day 9:30 AM when we're pre-market, or in the early-morning block (midnight–4 AM) on a weekday.
+    const earlyMorning = etHour < 4 && !isWeekend && !isHoliday && [1, 2, 3, 4, 5].includes(etDay);
+    if (isPreMarket || earlyMorning) {
       nextOpen.setHours(9, 30, 0, 0);
     } else {
-      // Advance to next day, skipping weekends and holidays
+      // Advance to next trading day
       nextOpen.setDate(nextOpen.getDate() + 1);
       while (
         nextOpen.getDay() === 0 ||
@@ -167,7 +193,11 @@ export function getMarketSession(): MarketSession {
     nextOpenMs = Math.max(0, nextOpen.getTime() - etNow.getTime());
   }
 
-  return { isOpen, isWeekend, isHoliday, isPreMarket, isAfterHours, session, nextOpenMs };
+  return {
+    isOpen, isWeekend, isHoliday, isPreMarket, isAfterHours,
+    isOvernight, isBreak, isExtendedHours, ibSessionVenue,
+    session, nextOpenMs,
+  };
 }
 
 export function isMarketOpen(): boolean {
