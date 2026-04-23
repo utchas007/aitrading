@@ -252,8 +252,23 @@ export default function PnLAnalytics() {
             </div>
           )}
 
+          {/* ── No-data banner ── */}
+          {s!.totalTrades === 0 && (
+            <div style={{
+              marginBottom: 20, padding: '12px 16px', borderRadius: 8,
+              border: `1px solid #2a2a4a`, background: '#0a0a14',
+              color: DIM, fontSize: 13, display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <span style={{ fontSize: 18 }}>📭</span>
+              <span>
+                No closed trades in this period. Stats will populate once the bot has executed and closed positions.
+                {s!.openTrades > 0 && ` (${s!.openTrades} position${s!.openTrades !== 1 ? 's' : ''} currently open)`}
+              </span>
+            </div>
+          )}
+
           {/* ── Summary Cards ── */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 28 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 12, marginBottom: 28 }}>
             <StatCard
               label="Realized P&L"
               value={fmtUSD(s!.totalRealized)}
@@ -261,26 +276,33 @@ export default function PnLAnalytics() {
               color={pnlColor(s!.totalRealized)}
             />
             <StatCard
+              label="Portfolio Value"
+              value={s!.portfolioValue > 0 ? fmtUSD(s!.portfolioValue) : '—'}
+              sub={s!.openTrades > 0 ? `${s!.openTrades} position${s!.openTrades !== 1 ? 's' : ''} open` : 'No open positions'}
+              color="#e2e8f0"
+            />
+            <StatCard
               label="Win Rate"
-              value={`${(s!.winRate * 100).toFixed(1)}%`}
+              value={s!.totalTrades > 0 ? `${(s!.winRate * 100).toFixed(1)}%` : '—'}
               sub={`${s!.winCount}W · ${s!.lossCount}L · ${s!.totalTrades} total`}
-              color={s!.winRate >= 0.5 ? GREEN : RED}
+              color={s!.totalTrades > 0 ? (s!.winRate >= 0.5 ? GREEN : RED) : '#666'}
             />
             <StatCard
               label="Avg Win / Loss"
-              value={`${fmtUSD(s!.avgWin)}`}
-              sub={`Avg loss: ${fmtUSD(s!.avgLoss)}`}
-              color={GREEN}
+              value={s!.winCount > 0 ? fmtUSD(s!.avgWin) : '—'}
+              sub={s!.lossCount > 0 ? `Avg loss: ${fmtUSD(s!.avgLoss)}` : 'No losses yet'}
+              color={s!.winCount > 0 ? GREEN : '#666'}
             />
             <StatCard
               label="Avg Hold Time"
-              value={fmtDuration(s!.avgHoldMinutes)}
-              sub={`${s!.openTrades} position${s!.openTrades !== 1 ? 's' : ''} open`}
+              value={s!.totalTrades > 0 ? fmtDuration(s!.avgHoldMinutes) : '—'}
+              sub={s!.totalTrades > 0 ? `across ${s!.totalTrades} closed trade${s!.totalTrades !== 1 ? 's' : ''}` : 'No closed trades'}
             />
             <StatCard
               label="Max Drawdown"
-              value={s!.maxDrawdown > 0 ? `-${fmtUSD(s!.maxDrawdown)}` : '—'}
-              color={s!.maxDrawdown > 0 ? RED : '#666'}
+              value={s!.totalTrades > 0 ? (s!.maxDrawdown > 0 ? `-${fmtUSD(s!.maxDrawdown)}` : '$0.00') : '—'}
+              sub={s!.maxDrawdown > 0 ? 'peak-to-trough (realized)' : s!.totalTrades > 0 ? 'No drawdown yet' : undefined}
+              color={s!.maxDrawdown > 0 ? RED : s!.totalTrades > 0 ? GREEN : '#666'}
             />
           </div>
 
@@ -419,9 +441,13 @@ export default function PnLAnalytics() {
           </div>
 
           {/* ── Time-of-Day Breakdown ── */}
-          {data.hourlyBreakdown.length > 0 && (
-            <div style={{ background: CARD_BG, border: `1px solid ${BORDER}`, borderRadius: 10, padding: '16px 20px', marginBottom: 24 }}>
-              <SectionTitle>P&amp;L by Hour of Day (ET)</SectionTitle>
+          <div style={{ background: CARD_BG, border: `1px solid ${BORDER}`, borderRadius: 10, padding: '16px 20px', marginBottom: 24 }}>
+            <SectionTitle>P&amp;L by Hour of Day (ET)</SectionTitle>
+            {data.hourlyBreakdown.length === 0 ? (
+              <div style={{ height: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666', fontSize: 12 }}>
+                No data — will populate as trades close
+              </div>
+            ) : (
               <ResponsiveContainer width="100%" height={180}>
                 <BarChart data={data.hourlyBreakdown} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={BORDER} vertical={false} />
@@ -448,8 +474,8 @@ export default function PnLAnalytics() {
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* ── Close Reasons + Recent Trades ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 16 }}>
