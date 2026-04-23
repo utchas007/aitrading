@@ -22,6 +22,9 @@ export const DEFAULT_STOP_LOSS_PERCENT = 0.05;
 /** Take-profit distance from entry as a fraction (e.g. 0.10 = 10%). */
 export const DEFAULT_TAKE_PROFIT_PERCENT = 0.10;
 
+/** Profit % at which half the position is sold to lock in gains (e.g. 0.05 = 5%). */
+export const DEFAULT_PARTIAL_PROFIT_PERCENT = 0.05;
+
 /** Profit % at which the trailing stop activates (e.g. 0.07 = 7%). */
 export const DEFAULT_TRAILING_ACTIVATION_PERCENT = 0.07;
 

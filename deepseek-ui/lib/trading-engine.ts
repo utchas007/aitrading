@@ -24,7 +24,7 @@ import {
   DEFAULT_MIN_CONFIDENCE, DEFAULT_MAX_POSITIONS, DEFAULT_RISK_PER_TRADE,
   DEFAULT_STOP_LOSS_PERCENT, DEFAULT_TAKE_PROFIT_PERCENT, DEFAULT_CHECK_INTERVAL_MS,
   DEFAULT_MAX_DAILY_TRADES, DEFAULT_TRADE_COOLDOWN_HOURS,
-  DEFAULT_TRAILING_ACTIVATION_PERCENT, DEFAULT_TRAILING_STOP_PERCENT,
+  DEFAULT_PARTIAL_PROFIT_PERCENT, DEFAULT_TRAILING_ACTIVATION_PERCENT, DEFAULT_TRAILING_STOP_PERCENT,
   ENTRY_LIMIT_SLIPPAGE, TECHNICAL_WEIGHT, AI_WEIGHT, AI_ONLY_MIN_CONFIDENCE,
   AGREEMENT_CONFIDENCE_BOOST, VOLUME_CONFIRMATION_RATIO, BB_BELOW_RSI_MAX,
   BB_ABOVE_RSI_MIN, ELEVATED_VIX_MACD_THRESHOLD, BEARISH_SENTIMENT_CONFIDENCE_PENALTY,
@@ -127,6 +127,9 @@ export interface ActivePosition {
   // High/low water marks for trailing stop — tracked in memory, reset on restart
   highestPrice?: number;      // Highest price reached — BUY trailing stop
   lowestPrice?: number;       // Lowest price reached  — SELL trailing stop
+  // Partial profit tracking
+  partialTaken?: boolean;     // True once 50% has been sold at the partial target
+  partialPnl?: number;        // Realized P&L from the partial exit
 }
 
 export interface TradingEngineConfig {
@@ -142,6 +145,7 @@ export interface TradingEngineConfig {
   minProfitMargin: number; // Minimum profit margin above fees (e.g., 0.03 = 3%)
   tradeCooldownHours: number; // Hours to wait before re-trading same pair
   maxDailyTrades: number; // Maximum trades per day
+  partialProfitPercent: number; // Profit % to sell half the position (e.g. 0.05 = 5%)
   trailingActivationPercent: number; // Profit % to activate trailing stop (e.g. 0.07 = 7%)
   trailingStopPercent: number; // Trail distance below highest price (e.g. 0.03 = 3%)
 }
@@ -176,6 +180,7 @@ export class TradingEngine {
       minProfitMargin:   config.minProfitMargin   || 0.02,   // 2% minimum profit above fees
       tradeCooldownHours:           config.tradeCooldownHours           || DEFAULT_TRADE_COOLDOWN_HOURS,
       maxDailyTrades:               config.maxDailyTrades               || DEFAULT_MAX_DAILY_TRADES,
+      partialProfitPercent:         config.partialProfitPercent         ?? DEFAULT_PARTIAL_PROFIT_PERCENT,
       trailingActivationPercent:    config.trailingActivationPercent    ?? DEFAULT_TRAILING_ACTIVATION_PERCENT,
       trailingStopPercent:          config.trailingStopPercent          ?? DEFAULT_TRAILING_STOP_PERCENT,
     };
@@ -1079,13 +1084,16 @@ export class TradingEngine {
           const ibPos = ibPositions.find(p => p.symbol === position.pair && p.position > 0);
           if (!ibPos) {
             // IB no longer holds shares → bracket SL or TP fired
-            const closeReason = position.pnl >= 0 ? 'take_profit' : 'stop_loss';
-            log.info('IB bracket closed position', { pair: position.pair, closeReason, pnl: position.pnl.toFixed(2), pnlPct: position.pnlPercent.toFixed(2) });
-            logActivity.completed(`✅ Position closed by IB — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${closeReason}`);
+            // Total P&L = remaining-half P&L + any locked partial P&L
+            const totalPnl = position.pnl + (position.partialPnl ?? 0);
+            const closeReason = totalPnl >= 0 ? 'take_profit' : 'stop_loss';
+            const partialNote = position.partialPnl ? ` (incl. $${position.partialPnl.toFixed(2)} partial)` : '';
+            log.info('IB bracket closed position', { pair: position.pair, closeReason, pnl: totalPnl.toFixed(2), pnlPct: position.pnlPercent.toFixed(2) });
+            logActivity.completed(`✅ Position closed by IB — ${position.pair} | Total P&L: $${totalPnl.toFixed(2)}${partialNote} | Reason: ${closeReason}`);
             saveNotification(
               'trade_closed',
               `Position Closed — ${position.pair}`,
-              `${closeReason.replace('_', ' ')} hit | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%)`,
+              `${closeReason.replace('_', ' ')} hit | Total P&L: $${totalPnl.toFixed(2)}${partialNote}`,
               position.pair,
             );
 
@@ -1095,7 +1103,7 @@ export class TradingEngine {
                   where: { id: position.dbTradeId },
                   data: {
                     exitPrice:   position.currentPrice,
-                    pnl:         position.pnl,
+                    pnl:         totalPnl,
                     pnlPercent:  position.pnlPercent,
                     status:      'closed',
                     closedAt:    new Date(),
@@ -1107,6 +1115,93 @@ export class TradingEngine {
 
             this.activePositions.delete(txid);
           } else {
+            // ── Partial profit: sell half at 5%, let rest ride ────────────────
+            if (!position.partialTaken && position.pnlPercent >= this.config.partialProfitPercent * 100) {
+              const halfShares = Math.floor(position.volume / 2);
+              if (halfShares >= 1) {
+                const partialPnl = (position.type === 'buy'
+                  ? (position.currentPrice - position.entryPrice)
+                  : (position.entryPrice - position.currentPrice)) * halfShares;
+
+                logActivity.info(`🎯 Partial profit — ${position.pair} | Selling ${halfShares}/${position.volume} shares at +${position.pnlPercent.toFixed(1)}% | Locking in $${partialPnl.toFixed(2)}`);
+
+                let partialSuccess = false;
+                try {
+                  // Cancel existing full-size SL + TP first
+                  if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
+                  if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
+
+                  // Sell half at market
+                  await ib.placeOrder({
+                    symbol:        position.pair,
+                    action:        position.type === 'buy' ? 'SELL' : 'BUY',
+                    quantity:      halfShares,
+                    order_type:    'MKT',
+                    validate_only: false,
+                  });
+                  partialSuccess = true;
+                } catch (e) {
+                  log.error('Partial profit market sell failed', { pair: position.pair, error: String(e) });
+                }
+
+                if (partialSuccess) {
+                  const remainingShares = position.volume - halfShares;
+                  try {
+                    // Replace protection with OCA pair sized for remaining shares
+                    const ocaResult = await ib.placeOcaOrder({
+                      symbol:        position.pair,
+                      action:        position.type === 'buy' ? 'SELL' : 'BUY',
+                      quantity:      remainingShares,
+                      stop_price:    position.stopLoss,
+                      limit_price:   position.takeProfit,
+                      validate_only: false,
+                    });
+                    if (ocaResult.stop_order_id)  position.slOrderId = ocaResult.stop_order_id;
+                    if (ocaResult.limit_order_id) position.tpOrderId = ocaResult.limit_order_id;
+                  } catch (e) {
+                    log.error('Failed to re-place OCA after partial profit', { pair: position.pair, error: String(e) });
+                  }
+
+                  position.partialTaken = true;
+                  position.partialPnl   = partialPnl;
+                  position.volume       = remainingShares;
+
+                  saveNotification(
+                    'trade_closed',
+                    `Partial Profit — ${position.pair}`,
+                    `Sold ${halfShares} shares at +${position.pnlPercent.toFixed(1)}% | $${partialPnl.toFixed(2)} locked | ${remainingShares} shares still running`,
+                    position.pair,
+                  );
+
+                  if (position.dbTradeId) {
+                    import('./db').then(({ prisma }) =>
+                      prisma.trade.update({
+                        where: { id: position.dbTradeId },
+                        data: {
+                          volume:    remainingShares,
+                          slOrderId: position.slOrderId ?? null,
+                          tpOrderId: position.tpOrderId ?? null,
+                        },
+                      })
+                    ).catch(e => log.error('DB failed to update partial profit', { error: String(e) }));
+                  }
+                } else {
+                  // Sell failed — restore full-size protection so position is not naked
+                  ib.placeOcaOrder({
+                    symbol:        position.pair,
+                    action:        position.type === 'buy' ? 'SELL' : 'BUY',
+                    quantity:      position.volume,
+                    stop_price:    position.stopLoss,
+                    limit_price:   position.takeProfit,
+                    validate_only: false,
+                  }).then(r => {
+                    if (r.stop_order_id)  position.slOrderId = r.stop_order_id;
+                    if (r.limit_order_id) position.tpOrderId = r.limit_order_id;
+                  }).catch(e => log.error('Failed to restore OCA after partial sell failure', { pair: position.pair, error: String(e) }));
+                }
+              }
+            }
+
             // ── Position still open: ratchet IB stop upward with trailing stop ──
             // Instead of firing a software market exit, we move the actual IB
             // stop-loss order up to the trailing floor and replace both exit
