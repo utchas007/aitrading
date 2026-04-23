@@ -1116,12 +1116,22 @@ export class TradingEngine {
 
         if (this.config.autoExecute) {
           // ── Native bracket mode: detect close by checking IB position ──────
+
+          // Guard 1: if IB returned an empty position list, it likely means a
+          // connectivity blip — never treat "all gone" as "all closed".
+          const ibDataTrusted = ibPositions.length > 0;
+
+          // Guard 2: skip close detection for positions younger than 120 seconds.
+          // IB can take up to a minute to reflect a new fill in getPositions().
+          const positionAgeMs  = Date.now() - position.timestamp;
+          const positionMature = positionAgeMs >= 120_000;
+
           const ibPos = ibPositions.find(p => p.symbol === position.pair && p.position > 0);
-          if (!ibPos) {
+          if (!ibPos && ibDataTrusted && positionMature) {
             // IB no longer holds shares → bracket SL or TP fired
             // Total P&L = remaining-half P&L + any locked partial P&L
             const totalPnl = position.pnl + (position.partialPnl ?? 0);
-            const closeReason = totalPnl >= 0 ? 'take_profit' : 'stop_loss';
+            const closeReason = totalPnl > 0 ? 'take_profit' : totalPnl < 0 ? 'stop_loss' : 'unknown';
             const partialNote = position.partialPnl ? ` (incl. $${position.partialPnl.toFixed(2)} partial)` : '';
             log.info('IB bracket closed position', { pair: position.pair, closeReason, pnl: totalPnl.toFixed(2), pnlPct: position.pnlPercent.toFixed(2) });
             logActivity.completed(`✅ Position closed by IB — ${position.pair} | Total P&L: $${totalPnl.toFixed(2)}${partialNote} | Reason: ${closeReason}`);
@@ -1151,6 +1161,12 @@ export class TradingEngine {
             }
 
             this.activePositions.delete(txid);
+          } else if (!ibPos && !ibDataTrusted) {
+            log.warn('Close detection skipped — IB returned empty positions list (connectivity blip?)', { pair: position.pair });
+          } else if (!ibPos && !positionMature) {
+            log.info('Close detection skipped — position too young for IB to reflect fill', {
+              pair: position.pair, ageMs: Math.round(positionAgeMs), minAgeMs: 120_000,
+            });
           } else {
             // ── Partial profit: sell half at 5%, let rest ride ────────────────
             if (!position.partialTaken && position.pnlPercent >= this.config.partialProfitPercent * 100) {
