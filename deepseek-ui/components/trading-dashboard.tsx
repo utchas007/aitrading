@@ -82,7 +82,8 @@ export default function TradingDashboard() {
     error: string | null;
     chatWorking: boolean;
     tradingAnalysisWorking: boolean;
-  }>({ connected: false, model: null, latencyMs: null, error: null, chatWorking: false, tradingAnalysisWorking: false });
+    lastAiRunAt: Date | null;
+  }>({ connected: false, model: null, latencyMs: null, error: null, chatWorking: false, tradingAnalysisWorking: false, lastAiRunAt: null });
 
   // Update state from WebSocket data
   useEffect(() => {
@@ -191,26 +192,26 @@ export default function TradingDashboard() {
     try {
       const [healthRes, activitiesRes] = await Promise.all([
         fetch('/api/health'),
-        fetch('/api/trading/activities?limit=50'),
+        fetch('/api/trading/activities?limit=200'),
       ]);
 
       const health = await healthRes.json();
       const ollama = health.services?.ollama;
       const ollamaOk = ollama?.status === 'ok';
 
-      // AI Trading Analysis: check if a 🤖 AI Sentiment log exists in the last 20 minutes
-      let tradingAnalysisWorking = false;
+      // Find the most recent AI Sentiment log entry (no time cutoff — just last occurrence)
+      let lastAiRunAt: Date | null = null;
       try {
         const acts = await activitiesRes.json();
-        const cutoff = Date.now() - 20 * 60 * 1000;
-        tradingAnalysisWorking = (acts.activities ?? []).some(
-          (a: { message: string; createdAt: string }) =>
-            a.message.includes('🤖 AI Sentiment') &&
-            new Date(a.createdAt).getTime() > cutoff
+        const aiEntry = (acts.activities ?? []).find(
+          (a: { message: string; createdAt: string }) => a.message.includes('🤖 AI Sentiment')
         );
+        if (aiEntry) lastAiRunAt = new Date(aiEntry.createdAt);
       } catch { /* non-fatal */ }
 
-      // AI Chat: check the chat endpoint responds (lightweight OPTIONS/HEAD not available, use activities as proxy)
+      // Trading analysis is "working" when Ollama is up and ready — not gated on recent run,
+      // because AI is only called when a strong BUY/SELL signal exists (may be hours between calls).
+      const tradingAnalysisWorking = ollamaOk;
       const chatWorking = ollamaOk;
 
       setAiStatus({
@@ -220,9 +221,10 @@ export default function TradingDashboard() {
         error: ollamaOk ? null : (ollama?.error ?? 'Unavailable'),
         chatWorking,
         tradingAnalysisWorking,
+        lastAiRunAt,
       });
     } catch {
-      setAiStatus({ connected: false, model: null, latencyMs: null, error: 'Health check failed', chatWorking: false, tradingAnalysisWorking: false });
+      setAiStatus({ connected: false, model: null, latencyMs: null, error: 'Health check failed', chatWorking: false, tradingAnalysisWorking: false, lastAiRunAt: null });
     }
   };
 
@@ -555,6 +557,20 @@ export default function TradingDashboard() {
                       </span>
                       <span style={{ color: aiStatus.tradingAnalysisWorking ? '#a855f7' : '#666' }}>
                         AI Trading Analysis {aiStatus.tradingAnalysisWorking ? '●' : '○'}
+                        {aiStatus.lastAiRunAt && (
+                          <span style={{ color: '#555', marginLeft: 4 }}>
+                            · last {(() => {
+                              const diff = Date.now() - aiStatus.lastAiRunAt!.getTime();
+                              const mins = Math.floor(diff / 60000);
+                              if (mins < 1) return 'just now';
+                              if (mins < 60) return `${mins}m ago`;
+                              return `${Math.floor(mins / 60)}h ago`;
+                            })()}
+                          </span>
+                        )}
+                        {!aiStatus.lastAiRunAt && (
+                          <span style={{ color: '#555', marginLeft: 4 }}>· not yet today</span>
+                        )}
                       </span>
                     </div>
                   </>
