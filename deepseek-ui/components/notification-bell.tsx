@@ -15,9 +15,13 @@ interface Notification {
 
 const TYPE_STYLES: Record<string, { color: string; icon: string }> = {
   trade_executed:  { color: "#00ff9f", icon: "✅" },
+  trade_closed:    { color: "#00ff9f", icon: "🎯" },
   trade_failed:    { color: "#ff4d6d", icon: "❌" },
   ib_disconnected: { color: "#f97316", icon: "🔌" },
   bot_stopped:     { color: "#ffd60a", icon: "⏹" },
+  alert_critical:  { color: "#ff4d6d", icon: "🚨" },
+  alert_warning:   { color: "#f97316", icon: "⚠️" },
+  alert_info:      { color: "#60a5fa", icon: "ℹ️" },
 };
 
 export default function NotificationBell() {
