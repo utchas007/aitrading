@@ -151,6 +151,9 @@ export const MAX_IB_FAILURE_COUNT = 3;
 /** Stop opening new positions if today's realized P&L drops below this fraction of account value. */
 export const DEFAULT_MAX_DAILY_LOSS_PERCENT = 0.02; // 2%
 
+/** Exit a position that has been open this many days without reaching +1% profit (capital recycling). */
+export const DEFAULT_MAX_HOLD_DAYS = 5;
+
 // ─── Sector / correlation cap ─────────────────────────────────────────────────
 
 /** Maximum concurrent open positions in the same sector. */
@@ -173,6 +176,7 @@ export const SECTOR_MAP: Record<string, string> = {
   AMD:   'semiconductors',
   INTC:  'semiconductors',
   QCOM:  'semiconductors',
+  AVGO:  'semiconductors',
   // EV / auto
   TSLA:  'ev_auto',
   RIVN:  'ev_auto',
@@ -180,13 +184,20 @@ export const SECTOR_MAP: Record<string, string> = {
   JPM:   'financials',
   BAC:   'financials',
   GS:    'financials',
+  V:     'financials',
+  MA:    'financials',
   // Healthcare
   JNJ:   'healthcare',
   PFE:   'healthcare',
   UNH:   'healthcare',
+  LLY:   'healthcare',
+  ABBV:  'healthcare',
   // Energy
   XOM:   'energy',
   CVX:   'energy',
+  // Consumer
+  COST:  'consumer',
+  WMT:   'consumer',
   // ETFs / index
   SPY:   'etf_index',
   QQQ:   'etf_index',

@@ -25,7 +25,7 @@ import {
   DEFAULT_STOP_LOSS_PERCENT, DEFAULT_TAKE_PROFIT_PERCENT, DEFAULT_CHECK_INTERVAL_MS,
   DEFAULT_MAX_DAILY_TRADES, DEFAULT_TRADE_COOLDOWN_HOURS,
   DEFAULT_PARTIAL_PROFIT_PERCENT, DEFAULT_TRAILING_ACTIVATION_PERCENT, DEFAULT_TRAILING_STOP_PERCENT,
-  DEFAULT_MAX_DAILY_LOSS_PERCENT, DEFAULT_MAX_POSITIONS_PER_SECTOR,
+  DEFAULT_MAX_DAILY_LOSS_PERCENT, DEFAULT_MAX_POSITIONS_PER_SECTOR, DEFAULT_MAX_HOLD_DAYS,
   ENTRY_LIMIT_SLIPPAGE, TECHNICAL_WEIGHT, AI_WEIGHT, AI_ONLY_MIN_CONFIDENCE,
   AGREEMENT_CONFIDENCE_BOOST, VOLUME_CONFIRMATION_RATIO, BB_BELOW_RSI_MAX,
   BB_ABOVE_RSI_MIN, ELEVATED_VIX_MACD_THRESHOLD, BEARISH_SENTIMENT_CONFIDENCE_PENALTY,
@@ -175,7 +175,26 @@ export class TradingEngine {
 
   constructor(config: Partial<TradingEngineConfig> = {}) {
     this.config = {
-      pairs: config.pairs || ['AAPL', 'MSFT', 'NVDA', 'TSLA'],
+      pairs: config.pairs || [
+        // Mega-cap tech
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META',
+        // Semiconductors
+        'NVDA', 'AMD', 'QCOM', 'AVGO',
+        // Growth tech
+        'TSLA', 'PLTR', 'CRM', 'NFLX', 'ORCL', 'ADBE',
+        // Financials
+        'JPM', 'V', 'GS',
+        // Healthcare
+        'LLY', 'UNH',
+        // Energy
+        'XOM',
+        // Consumer
+        'COST',
+        // Industrial
+        'CAT',
+        // ETFs
+        'IWM',
+      ],
       checkInterval:     config.checkInterval     || DEFAULT_CHECK_INTERVAL_MS,
       minConfidence:     config.minConfidence     || DEFAULT_MIN_CONFIDENCE,
       maxPositions:      config.maxPositions      || DEFAULT_MAX_POSITIONS,
@@ -1099,7 +1118,16 @@ export class TradingEngine {
         // Update current price and P&L
         try {
           const ticker = await ib.getTicker(position.pair);
-          const currentPrice = ticker.last ?? ticker.close ?? position.currentPrice;
+          let resolvedPrice: number | null = ticker.last ?? ticker.close ?? null;
+          if (resolvedPrice === null) {
+            // IB not streaming (after hours / weekend) — fall back to last hourly close
+            // so P&L shows a real price instead of $0 or entry price.
+            try {
+              const bars = await getHistoricalPrices(position.pair, 60);
+              if (bars.length > 0) resolvedPrice = bars[bars.length - 1].close;
+            } catch { /* non-fatal — keep last known value */ }
+          }
+          const currentPrice: number = resolvedPrice ?? position.currentPrice;
           position.currentPrice = currentPrice;
 
           if (position.type === 'buy') {
@@ -1217,15 +1245,31 @@ export class TradingEngine {
                 if (partialSuccess) {
                   const remainingShares = position.volume - halfShares;
                   try {
+                    // Move stop to entry + 2.5% for the remaining half — guarantees
+                    // the second half can't end as a loss after partial profit fired.
+                    const guaranteedStop = parseFloat(
+                      (position.type === 'buy'
+                        ? position.entryPrice * 1.025
+                        : position.entryPrice * 0.975
+                      ).toFixed(2)
+                    );
+                    // Never move stop backwards — use the better of new floor vs existing stop
+                    const newStop = position.type === 'buy'
+                      ? Math.max(guaranteedStop, position.stopLoss)
+                      : Math.min(guaranteedStop, position.stopLoss);
+
+                    logActivity.info(`🔒 Stop moved to +2.5% above entry — ${position.pair} | SL: $${position.stopLoss.toFixed(2)} → $${newStop.toFixed(2)} (2nd half now guaranteed profit)`);
+
                     // Replace protection with OCA pair sized for remaining shares
                     const ocaResult = await ib.placeOcaOrder({
                       symbol:        position.pair,
                       action:        position.type === 'buy' ? 'SELL' : 'BUY',
                       quantity:      remainingShares,
-                      stop_price:    position.stopLoss,
+                      stop_price:    newStop,
                       limit_price:   position.takeProfit,
                       validate_only: false,
                     });
+                    position.stopLoss = newStop;
                     if (ocaResult.stop_order_id)  position.slOrderId = ocaResult.stop_order_id;
                     if (ocaResult.limit_order_id) position.tpOrderId = ocaResult.limit_order_id;
                   } catch (e) {
@@ -1249,6 +1293,7 @@ export class TradingEngine {
                         where: { id: position.dbTradeId },
                         data: {
                           volume:    remainingShares,
+                          stopLoss:  position.stopLoss,   // persist raised stop (+2.5%)
                           slOrderId: position.slOrderId ?? null,
                           tpOrderId: position.tpOrderId ?? null,
                           closeTxid: 'partial_taken', // flag survives restart — recoverPositions() reads this
@@ -1347,6 +1392,53 @@ export class TradingEngine {
                   // SL cancel threw — position still protected by old stop, skip this cycle
                   log.warn('Ratchet aborted — old SL still active on IB', { pair: position.pair, error: String(e) });
                 }
+              }
+            }
+
+            // ── Time-based exit: recycle capital stuck near entry for 5+ days ──
+            // A trade that hasn't reached +1% after DEFAULT_MAX_HOLD_DAYS is unlikely
+            // to reach its target — better to free up the slot for fresh opportunities.
+            const holdDays = (Date.now() - position.timestamp) / (1000 * 60 * 60 * 24);
+            const stuckAtEntry = position.pnlPercent < 1.0;
+            if (holdDays >= DEFAULT_MAX_HOLD_DAYS && stuckAtEntry) {
+              logActivity.warning(
+                `⏳ Time-based exit — ${position.pair} | Open ${holdDays.toFixed(1)} days, P&L: ${position.pnlPercent.toFixed(1)}% — recycling capital`
+              );
+              try {
+                if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
+                if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
+                await ib.placeOrder({
+                  symbol:        position.pair,
+                  action:        position.type === 'buy' ? 'SELL' : 'BUY',
+                  quantity:      position.volume,
+                  order_type:    'MKT',
+                  validate_only: false,
+                });
+                this.dailyRealizedPnl += position.pnl;
+                if (position.dbTradeId) {
+                  import('./db').then(({ prisma }) =>
+                    prisma.trade.update({
+                      where: { id: position.dbTradeId },
+                      data: {
+                        status:      'closed',
+                        closedAt:    new Date(),
+                        exitPrice:   position.currentPrice,
+                        pnl:         position.pnl,
+                        pnlPercent:  position.pnlPercent,
+                        closeReason: 'time_exit',
+                      },
+                    })
+                  ).catch(e => log.error('DB failed to update time-based exit', { error: String(e) }));
+                }
+                saveNotification(
+                  'trade_closed',
+                  `Time Exit — ${position.pair}`,
+                  `Closed after ${holdDays.toFixed(1)} days with no progress | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(1)}%)`,
+                  position.pair,
+                );
+                this.activePositions.delete(txid);
+              } catch (e) {
+                log.error('Time-based exit failed', { pair: position.pair, error: String(e) });
               }
             }
           }
