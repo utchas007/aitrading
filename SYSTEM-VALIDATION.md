@@ -221,6 +221,61 @@ Check the Trading tab for:
 
 ---
 
+## 11. Notification System
+
+Verifies that trade notifications are being saved to the database and are visible in the notification bell.
+
+**Check recent notifications in the DB:**
+```bash
+cd ~/Trading\ Project/deepseek-ui && node -e "
+const { Pool } = require('pg');
+const pool = new Pool({ connectionString: 'postgresql://tradingbot:tradingbot123@localhost:5432/tradingdb' });
+pool.query('SELECT id, type, title, message, pair, read, \"createdAt\" FROM \"Notification\" ORDER BY \"createdAt\" DESC LIMIT 10')
+  .then(r => { console.log('Recent notifications:', r.rows.length); r.rows.forEach(row => console.log(row.createdAt.toISOString(), row.type, row.title)); pool.end(); });
+"
+```
+
+**Check the notification API endpoint:**
+```bash
+curl -s http://localhost:3001/api/notifications | python3 -m json.tool | head -30
+```
+
+**Healthy:**
+```json
+{
+  "success": true,
+  "notifications": [...],
+  "unreadCount": 2
+}
+```
+
+**Check that the bot container has the correct NEXTJS_URL set (required for notifications to reach the DB):**
+```bash
+sudo docker compose exec trading-bot printenv NEXTJS_URL
+```
+
+**Expected:** `http://nextjs:3000`
+
+**If blank or wrong:** The bot is using the fallback `localhost:3001` which fails inside Docker — notifications from trades will be silently dropped.
+
+**Fix:** Confirm `docker-compose.yml` has this under `trading-bot` environment:
+```yaml
+NEXTJS_URL: http://nextjs:3000
+```
+Then rebuild: `sudo docker compose up -d --build trading-bot`
+
+**If the bell shows 0 notifications after trades have executed:**
+1. Check `NEXTJS_URL` above
+2. Check bot logs for errors: `sudo docker compose logs trading-bot --tail=50`
+3. Manually verify a recent trade inserted a row in the `Notification` table using the DB query above
+
+**Notification bell check (UI):**
+- Open http://localhost:3001 and click the 🔔 bell in the top-right
+- After any trade executes, a notification should appear within 10 seconds (the bell polls every 10s)
+- Unread notifications show a red badge count and a blue dot on each entry
+
+---
+
 ## Quick All-in-One Check
 
 ```bash
@@ -240,7 +295,16 @@ const { Pool } = require('pg');
 const pool = new Pool({ connectionString: 'postgresql://tradingbot:tradingbot123@localhost:5432/tradingdb' });
 pool.query('SELECT \"createdAt\", message FROM \"ActivityLog\" ORDER BY \"createdAt\" DESC LIMIT 3')
   .then(r => { r.rows.forEach(row => console.log(' ', row.createdAt.toISOString(), row.message.substring(0,80))); pool.end(); });
-"
+" && \
+echo "" && echo "=== Notifications ===" && \
+cd ~/Trading\ Project/deepseek-ui && node -e "
+const { Pool } = require('pg');
+const pool = new Pool({ connectionString: 'postgresql://tradingbot:tradingbot123@localhost:5432/tradingdb' });
+pool.query('SELECT COUNT(*) AS total, SUM(CASE WHEN read = false THEN 1 ELSE 0 END) AS unread FROM \"Notification\"')
+  .then(r => { const row = r.rows[0]; console.log('  Total notifications:', row.total, '| Unread:', row.unread); pool.end(); })
+  .catch(() => { console.log('  No notifications yet'); pool.end(); });
+" && \
+sudo docker compose exec trading-bot printenv NEXTJS_URL 2>/dev/null | xargs -I{} echo "  NEXTJS_URL: {}" || echo "  NEXTJS_URL: (check docker-compose.yml)"
 ```
 
 ---
@@ -263,5 +327,7 @@ pool.query('SELECT \"createdAt\", message FROM \"ActivityLog\" ORDER BY \"create
 |---|---|
 | Dashboard / UI components | `sudo docker compose up -d --build nextjs` |
 | Trading bot logic | `sudo docker compose up -d --build trading-bot` |
+| Notification routing (`notify.ts`, `NEXTJS_URL`) | `sudo docker compose up -d --build trading-bot` |
+| Bell icon / notification UI | `sudo docker compose up -d --build nextjs` |
 | Both | `sudo docker compose up -d --build nextjs trading-bot` |
 | Everything from scratch | `sudo docker compose up -d --build` |

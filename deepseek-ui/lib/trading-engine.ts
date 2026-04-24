@@ -163,6 +163,10 @@ export class TradingEngine {
   private positionIntervalId?: NodeJS.Timeout; // Fast loop: SL/TP monitoring every 30s
   private ibFailureCount: number = 0;          // Consecutive IB health check failures
   private readonly MAX_IB_FAILURES = MAX_IB_FAILURE_COUNT;
+  private ibWaitingReconnect: boolean = false;  // Paused waiting for IB to come back
+  private priceLastSeenAt: Map<string, number> = new Map(); // Last time each symbol had price > 0
+  private dynamicPairs: Map<string, number> = new Map();    // AI-suggested symbols → addedAt ms
+  private lastWatchlistSuggestAt: number = 0;               // Rate-limit: once every 6h
   private activePositions: Map<string, ActivePosition> = new Map();
   private lastTradeTime: Map<string, number> = new Map(); // Track last trade time per pair
   private dailyTradeCount: number = 0;
@@ -297,10 +301,64 @@ export class TradingEngine {
     }
   }
 
+  /** Returns static watchlist merged with unexpired AI-suggested symbols. */
+  private getEffectivePairs(): string[] {
+    const now = Date.now();
+    for (const [symbol, addedAt] of this.dynamicPairs) {
+      if (now - addedAt > 24 * 60 * 60 * 1000) this.dynamicPairs.delete(symbol);
+    }
+    const dynamic = Array.from(this.dynamicPairs.keys()).filter(s => !this.config.pairs.includes(s));
+    return [...this.config.pairs, ...dynamic];
+  }
+
+  /** Ask AI to suggest new watchlist additions based on World Monitor news. Rate-limited to once every 6h. */
+  private async suggestWatchlistAdditions(): Promise<void> {
+    const SIX_HOURS = 6 * 60 * 60 * 1000;
+    if (Date.now() - this.lastWatchlistSuggestAt < SIX_HOURS) return;
+    this.lastWatchlistSuggestAt = Date.now();
+    try {
+      const news = await this.fetchWorldMonitorNews();
+      if (news.length === 0) return;
+      const nextjsUrl = process.env.NEXTJS_URL || 'http://localhost:3001';
+      const res = await fetch(`${nextjsUrl}/api/trading/watchlist-suggest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ news, currentPairs: this.getEffectivePairs() }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const suggestions: string[] = data.suggestions ?? [];
+      if (suggestions.length === 0) return;
+      const now = Date.now();
+      for (const symbol of suggestions) this.dynamicPairs.set(symbol, now);
+      logActivity.info(`🔭 AI watchlist update: added ${suggestions.join(', ')} (active for 24h)`);
+    } catch {
+      // non-critical — never blocks trading
+    }
+  }
+
   /**
    * Check all markets and generate trading signals
    */
   private async checkMarkets(): Promise<void> {
+    // IB reconnect-waiting mode: keep checking every cycle until IB comes back
+    if (this.ibWaitingReconnect) {
+      try {
+        const health = await createIBClient().getHealth();
+        if (health.connected) {
+          this.ibWaitingReconnect = false;
+          this.ibFailureCount = 0;
+          logActivity.info('✅ IB reconnected — resuming trading');
+          saveNotification('ib_disconnected', 'IB Reconnected', 'IB connection restored — bot resuming normal operation.');
+        } else {
+          logActivity.info('⏳ Waiting for IB to reconnect...');
+        }
+      } catch {
+        logActivity.info('⏳ Still waiting for IB — connection not yet available');
+      }
+      return;
+    }
+
     const session = getMarketSession();
     if (!session.isOpen && !session.isExtendedHours) {
       // Market fully closed — run pre-open prep near open, otherwise skip
@@ -343,10 +401,10 @@ export class TradingEngine {
       this.ibFailureCount++;
       logActivity.error(`⚠️ IB health check failed (${this.ibFailureCount}/${this.MAX_IB_FAILURES}): ${err.message}`);
       if (this.ibFailureCount >= this.MAX_IB_FAILURES) {
-        logActivity.error('🔴 IB unreachable — stopping engine to prevent silent failures. Restart once ib_service.py is running.');
-        saveNotification('ib_disconnected', 'IB Connection Lost', 'Bot stopped after 3 consecutive IB health check failures. Restart ib_service.py and TWS.');
+        logActivity.error('🔴 IB unreachable — pausing engine. Will auto-resume when IB reconnects.');
+        saveNotification('ib_disconnected', 'IB Connection Lost', 'Bot paused after 3 consecutive IB health check failures. Will auto-resume when IB reconnects.');
         void alertIBDisconnected(this.ibFailureCount);
-        this.stop();
+        this.ibWaitingReconnect = true;
       }
       return;
     }
@@ -362,23 +420,34 @@ export class TradingEngine {
       // Save portfolio snapshot before checking markets
       await this.savePortfolioSnapshot();
       
+      // Ask AI to suggest new watchlist additions every 6 hours (fire-and-forget)
+      void this.suggestWatchlistAdditions();
+
       // Pre-fetch all tickers once with a 2s stagger to respect IB pacing limits
       // This replaces the N² pattern where each generateSignal() fetched all tickers again
       const ib = createIBClient();
+      const effectivePairs = this.getEffectivePairs();
       const marketData: Record<string, { price: number; volume: number; change24h: string }> = {};
-      logActivity.analyzing(`Fetching live prices for ${this.config.pairs.length} symbols...`);
-      for (const symbol of this.config.pairs) {
+      logActivity.analyzing(`Fetching live prices for ${effectivePairs.length} symbols (${this.dynamicPairs.size > 0 ? `${this.config.pairs.length} static + ${this.dynamicPairs.size} AI-suggested` : 'static watchlist'})...`);
+      for (const symbol of effectivePairs) {
         try {
           const t = await ib.getTicker(symbol);
-          marketData[symbol] = {
-            price:     t.last ?? t.close ?? 0,
-            volume:    t.volume ?? 0,
-            change24h: '0',
-          };
+          const price = t.last ?? t.close ?? 0;
+          if (price > 0) {
+            this.priceLastSeenAt.set(symbol, Date.now());
+            marketData[symbol] = { price, volume: t.volume ?? 0, change24h: '0' };
+          } else {
+            const lastSeen = this.priceLastSeenAt.get(symbol);
+            const staleMs = lastSeen ? Date.now() - lastSeen : Infinity;
+            if (session.isOpen && staleMs > 5 * 60 * 1000) {
+              logActivity.warning(`⚠️ ${symbol}: no valid price in ${Math.round(staleMs / 60000)}min during market hours — skipping stale data`);
+            }
+            marketData[symbol] = { price: 0, volume: 0, change24h: '0' };
+          }
         } catch {
           marketData[symbol] = { price: 0, volume: 0, change24h: '0' };
         }
-        if (this.config.pairs.indexOf(symbol) < this.config.pairs.length - 1) {
+        if (effectivePairs.indexOf(symbol) < effectivePairs.length - 1) {
           await new Promise(r => setTimeout(r, 2000)); // 2s between ticker requests
         }
       }
@@ -412,7 +481,7 @@ export class TradingEngine {
       }
 
       // Check each trading pair — 12s delay between analysis cycles to respect IB OHLC pacing
-      for (const pair of this.config.pairs) {
+      for (const pair of effectivePairs) {
         try {
           logActivity.analyzing(`Analyzing ${pair}...`);
           await new Promise(r => setTimeout(r, 12000));
