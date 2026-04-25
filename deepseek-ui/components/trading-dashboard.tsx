@@ -619,15 +619,15 @@ export default function TradingDashboard() {
           padding: 20,
           marginBottom: 24,
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>Price Chart</h2>
-            <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ marginBottom: 16 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 700, color: '#fff', marginBottom: 12 }}>Price Chart</h2>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {stocks.map((s: string) => (
                 <button
                   key={s}
                   onClick={() => setSelectedPair(s)}
                   style={{
-                    padding: '6px 12px',
+                    padding: '5px 11px',
                     background: selectedPair === s ? '#00ff9f' : '#1a1a2e',
                     color: selectedPair === s ? '#000' : '#c8d0e0',
                     border: 'none',
@@ -636,6 +636,7 @@ export default function TradingDashboard() {
                     fontWeight: 600,
                     cursor: 'pointer',
                     transition: 'all 0.2s',
+                    whiteSpace: 'nowrap',
                   }}
                 >
                   {s}
