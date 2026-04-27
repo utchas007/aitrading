@@ -1294,9 +1294,10 @@ export class TradingEngine {
 
                 let partialSuccess = false;
                 try {
-                  // Cancel existing full-size SL + TP first
+                  // Cancel existing full-size SL + TP first, plus any orphaned orders
                   if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
                   if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
+                  await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
 
                   // Sell half at market
                   await ib.placeOrder({
@@ -1474,8 +1475,11 @@ export class TradingEngine {
                 `⏳ Time-based exit — ${position.pair} | Open ${holdDays.toFixed(1)} days, P&L: ${position.pnlPercent.toFixed(1)}% — recycling capital`
               );
               try {
+                // Cancel known order IDs first, then cancel all remaining open orders
+                // for this symbol as a safety net (handles bot-restart ID loss)
                 if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
                 if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
+                await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
                 await ib.placeOrder({
                   symbol:        position.pair,
                   action:        position.type === 'buy' ? 'SELL' : 'BUY',

@@ -872,6 +872,24 @@ async def cancel_order(order_id: int):
     return {"cancelled": True, "order_id": order_id}
 
 
+@app.delete("/orders/symbol/{symbol}")
+async def cancel_orders_for_symbol(symbol: str):
+    """Cancel all open orders for a symbol. Used as a safety net when closing positions."""
+    await ensure_connected()
+    active_statuses = {"Submitted", "PreSubmitted"}
+    cancelled = []
+    for t in ib.trades():
+        if t.contract.symbol == symbol and t.orderStatus.status in active_statuses:
+            try:
+                ib.cancelOrder(t.order)
+                cancelled.append(t.order.orderId)
+            except Exception:
+                pass
+    if cancelled:
+        await asyncio.sleep(0.5)
+    return {"symbol": symbol, "cancelled": cancelled, "count": len(cancelled)}
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 60)

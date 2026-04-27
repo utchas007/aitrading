@@ -356,5 +356,10 @@ export function createIBClient() {
     async cancelOrder(orderId: number): Promise<{ cancelled: boolean; order_id: number }> {
       return ibFetch(`/order/${orderId}`, { method: 'DELETE' });
     },
+
+    /** Cancel ALL open orders for a symbol — safety net when closing positions */
+    async cancelOrdersForSymbol(symbol: string): Promise<{ cancelled: number[]; count: number }> {
+      return ibFetch(`/orders/symbol/${symbol}`, { method: 'DELETE' });
+    },
   };
 }
