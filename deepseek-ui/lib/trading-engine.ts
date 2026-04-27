@@ -438,9 +438,11 @@ export class TradingEngine {
             marketData[symbol] = { price, volume: t.volume ?? 0, change24h: '0' };
           } else {
             const lastSeen = this.priceLastSeenAt.get(symbol);
-            const staleMs = lastSeen ? Date.now() - lastSeen : Infinity;
-            if (session.isOpen && staleMs > 5 * 60 * 1000) {
-              logActivity.warning(`⚠️ ${symbol}: no valid price in ${Math.round(staleMs / 60000)}min during market hours — skipping stale data`);
+            if (lastSeen && session.isOpen) {
+              const staleMs = Date.now() - lastSeen;
+              if (staleMs > 5 * 60 * 1000) {
+                logActivity.warning(`⚠️ ${symbol}: no valid price in ${Math.round(staleMs / 60000)}min during market hours — skipping stale data`);
+              }
             }
             marketData[symbol] = { price: 0, volume: 0, change24h: '0' };
           }
