@@ -105,7 +105,7 @@ async function checkOllama(): Promise<ServiceHealth> {
 async function checkWorldMonitor(): Promise<ServiceHealth> {
   const t = Date.now();
   try {
-    const res = await fetch(`${WORLDMONITOR_URL}/api/health`, {
+    const res = await fetch(`${WORLDMONITOR_URL}/api/indices`, {
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     if (!res.ok) return { status: 'error', latencyMs: Date.now() - t, error: `HTTP ${res.status}` };
