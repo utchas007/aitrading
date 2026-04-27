@@ -1663,8 +1663,55 @@ export class TradingEngine {
           logActivity.info('ℹ️  Native IB bracket orders are still active — SL/TP protection is intact');
         }
       }
+
+      // ── Restore daily state from DB so restarts don't reset guards ──────────
+      await this.recoverDailyState(prisma);
+
     } catch (err) {
       logActivity.error(`Position recovery failed: ${err}`);
+    }
+  }
+
+  private async recoverDailyState(prisma: any): Promise<void> {
+    try {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+
+      // Daily trade count — all trades opened today
+      const todayTrades = await prisma.trade.findMany({
+        where: { createdAt: { gte: todayStart } },
+        select: { pair: true, pnl: true, status: true, createdAt: true, closedAt: true },
+      });
+
+      this.dailyTradeCount = todayTrades.length;
+
+      // Daily realized P&L — sum of pnl on trades closed today
+      this.dailyRealizedPnl = todayTrades
+        .filter((t: any) => t.status === 'closed' && t.pnl != null)
+        .reduce((sum: number, t: any) => sum + t.pnl, 0);
+
+      // Trade cooldowns — restore last trade time for any symbol traded in the last hour
+      const cooldownCutoff = new Date(Date.now() - this.config.tradeCooldownHours * 60 * 60 * 1000);
+      const recentTrades = await prisma.trade.findMany({
+        where: { createdAt: { gte: cooldownCutoff } },
+        select: { pair: true, createdAt: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      for (const t of recentTrades) {
+        if (!this.lastTradeTime.has(t.pair)) {
+          this.lastTradeTime.set(t.pair, new Date(t.createdAt).getTime());
+        }
+      }
+
+      this.lastResetDate = new Date().toDateString();
+
+      logActivity.info(
+        `📅 Daily state restored — trades today: ${this.dailyTradeCount} | ` +
+        `realized P&L: $${this.dailyRealizedPnl.toFixed(2)} | ` +
+        `cooldowns active: ${this.lastTradeTime.size} symbol(s)`
+      );
+    } catch (err) {
+      logActivity.error(`Daily state recovery failed: ${err}`);
     }
   }
 
