@@ -332,6 +332,15 @@ export class TradingEngine {
       const now = Date.now();
       for (const symbol of suggestions) this.dynamicPairs.set(symbol, now);
       logActivity.info(`🔭 AI watchlist update: added ${suggestions.join(', ')} (active for 24h)`);
+      // Persist to DB so dynamic pairs survive restarts
+      const dpEntries = Array.from(this.dynamicPairs.entries()).map(([symbol, addedAt]) => ({ symbol, addedAt }));
+      import('./db').then(({ prisma }) =>
+        prisma.botCache.upsert({
+          where: { key: 'dynamic_pairs' },
+          update: { value: dpEntries },
+          create: { key: 'dynamic_pairs', value: dpEntries },
+        })
+      ).catch(() => {});
     } catch {
       // non-critical — never blocks trading
     }
@@ -453,6 +462,16 @@ export class TradingEngine {
           await new Promise(r => setTimeout(r, 2000)); // 2s between ticker requests
         }
       }
+
+      // Persist price timestamps to DB once per cycle (fire-and-forget)
+      import('./db').then(({ prisma }) => {
+        const entries = Object.fromEntries(this.priceLastSeenAt);
+        return prisma.botCache.upsert({
+          where:  { key: 'price_last_seen' },
+          update: { value: entries },
+          create: { key: 'price_last_seen', value: entries },
+        });
+      }).catch(() => {});
 
       // Fetch account balance once per cycle — passed to each generateSignal() call
       let availableCash = 10000;
@@ -1704,6 +1723,34 @@ export class TradingEngine {
       }
 
       this.lastResetDate = new Date().toDateString();
+
+      // Restore dynamic pairs (AI-suggested watchlist)
+      try {
+        const dpRow = await prisma.botCache.findUnique({ where: { key: 'dynamic_pairs' } });
+        if (dpRow) {
+          const entries = dpRow.value as { symbol: string; addedAt: number }[];
+          const now = Date.now();
+          for (const e of entries) {
+            if (now - e.addedAt < 24 * 60 * 60 * 1000) {
+              this.dynamicPairs.set(e.symbol, e.addedAt);
+            }
+          }
+          if (this.dynamicPairs.size > 0) {
+            logActivity.info(`🔭 Restored ${this.dynamicPairs.size} AI-suggested ticker(s): ${Array.from(this.dynamicPairs.keys()).join(', ')}`);
+          }
+        }
+      } catch { /* non-fatal */ }
+
+      // Restore stale price timestamps
+      try {
+        const ptRow = await prisma.botCache.findUnique({ where: { key: 'price_last_seen' } });
+        if (ptRow) {
+          const entries = ptRow.value as Record<string, number>;
+          for (const [symbol, ts] of Object.entries(entries)) {
+            this.priceLastSeenAt.set(symbol, ts);
+          }
+        }
+      } catch { /* non-fatal */ }
 
       logActivity.info(
         `📅 Daily state restored — trades today: ${this.dailyTradeCount} | ` +

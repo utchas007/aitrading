@@ -180,3 +180,9 @@ model BotState {
   config      Json?
   updatedAt   DateTime @updatedAt
 }
+
+model BotCache {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
