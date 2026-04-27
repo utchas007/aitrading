@@ -52,7 +52,7 @@ export async function GET(req: NextRequest) {
 
   // Check news API (through our proxy)
   try {
-    const newsRes = await fetch('http://localhost:3001/api/worldmonitor/news?category=markets&limit=1', {
+    const newsRes = await fetch('http://localhost:3000/api/worldmonitor/news?category=markets&limit=1', {
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     if (newsRes.ok) {
