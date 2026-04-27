@@ -1576,11 +1576,38 @@ export class TradingEngine {
         return;
       }
 
+      // Fetch open orders once so we can detect unfilled entry orders
+      let ibOrders: { symbol: string; action: string; status: string }[] = [];
+      try {
+        ibOrders = await ib.getOrders();
+      } catch { /* non-fatal */ }
+
       let recovered = 0;
       let markedClosed = 0;
 
       for (const trade of openTrades) {
         const ibPos = ibPositions.find(p => p.symbol === trade.pair && p.position > 0);
+
+        if (!ibPos) {
+          // Before marking closed, check if there's still an unfilled entry BUY order —
+          // if so, the position hasn't opened yet (limit not yet filled) — don't close it.
+          const pendingEntry = ibOrders.some(
+            o => o.symbol === trade.pair &&
+                 o.action === 'BUY' &&
+                 (o.status === 'Submitted' || o.status === 'PreSubmitted')
+          );
+          if (pendingEntry) {
+            logActivity.info(`⏳ ${trade.pair} entry order still pending in IB — skipping recovery until filled`);
+            // Cancel stored bracket orders and the pending entry so we start fresh next signal
+            await ib.cancelOrdersForSymbol(trade.pair).catch(() => {});
+            await prisma.trade.update({
+              where: { id: trade.id },
+              data: { status: 'closed', closedAt: new Date(), closeReason: 'entry_never_filled' },
+            });
+            markedClosed++;
+            continue;
+          }
+        }
 
         if (ibPos) {
           // IB confirms shares are still held — restore to activePositions
