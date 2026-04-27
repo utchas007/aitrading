@@ -50,15 +50,13 @@ export async function GET(req: NextRequest) {
     status.error = 'World Monitor not reachable';
   }
 
-  // Check news API (through our proxy)
+  // Check news by hitting an RSS feed directly (avoids unreliable self-call)
   try {
-    const newsRes = await fetch('http://localhost:3000/api/worldmonitor/news?category=markets&limit=1', {
+    const rssRes = await fetch('https://feeds.content.dowjones.io/public/rss/mw_topstories', {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
-    if (newsRes.ok) {
-      const data = await newsRes.json();
-      status.services.news = data.success && data.news?.length > 0;
-    }
+    status.services.news = rssRes.ok;
   } catch {
     status.services.news = false;
   }
