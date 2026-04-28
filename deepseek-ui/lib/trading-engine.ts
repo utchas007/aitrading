@@ -369,8 +369,11 @@ export class TradingEngine {
     }
 
     const session = getMarketSession();
-    if (!session.isOpen && !session.isExtendedHours) {
-      // Market fully closed — run pre-open prep near open, otherwise skip
+
+    // Only trade during regular market hours (9:30–16:00 ET Mon–Fri)
+    // Extended hours and overnight sessions are skipped for new signals.
+    // Position monitoring continues on its own 30-second timer regardless.
+    if (!session.isOpen) {
       const mins = Math.round(session.nextOpenMs / 60000);
       const wait = mins > 60 ? `${Math.round(mins / 60)}h` : `${mins}m`;
       const todayStr = new Date().toDateString();
@@ -379,19 +382,9 @@ export class TradingEngine {
         await this.gatherOffHoursData();
         this.preOpenPrepDone = todayStr;
       } else {
-        log.debug('Market closed, skipping cycle', { session: session.session, nextOpenIn: wait });
+        log.debug('Market closed/extended hours — skipping new signals', { session: session.session, nextOpenIn: wait });
       }
       return;
-    }
-
-    // Skip during the 3:50–4:00 AM break between overnight and pre-market
-    if (session.isBreak) {
-      log.debug('Break window (3:50–4:00 AM ET), skipping cycle');
-      return;
-    }
-
-    if (session.isExtendedHours) {
-      logActivity.info(`⏰ Extended hours trading active — ${session.session}`);
     }
 
     // Skip signal generation during noisy open/close windows
@@ -1004,6 +997,18 @@ export class TradingEngine {
 
       if (signal.action === 'hold') return;
 
+      // Hard gate: never place orders outside regular market hours or when IB is disconnected
+      const execSession = getMarketSession();
+      if (!execSession.isOpen) {
+        logActivity.warning(`⛔ Order blocked — market not in regular hours (${execSession.session}). No orders placed outside 9:30–16:00 ET.`);
+        return;
+      }
+      const ibHealth = await ib.getHealth();
+      if (!ibHealth.connected) {
+        logActivity.warning(`⛔ Order blocked — IB reports disconnected. Cannot place order for ${signal.pair}.`);
+        return;
+      }
+
       // Fetch IB positions once — used for both BUY and SELL guards below
       const ibPositions = await ib.getPositions();
 
@@ -1048,11 +1053,6 @@ export class TradingEngine {
           ? parseFloat((signal.entryPrice * (1 + limitSlippage)).toFixed(2))
           : parseFloat((signal.entryPrice * (1 - limitSlippage)).toFixed(2));
 
-        const tradeSession = getMarketSession();
-        if (tradeSession.isExtendedHours) {
-          logActivity.info(`🌙 Extended hours order — session: ${tradeSession.session} | venue: ${tradeSession.ibSessionVenue}`);
-        }
-
         const bracket = await ib.placeBracketOrder({
           symbol:           signal.pair,
           action:           signal.action === 'buy' ? 'BUY' : 'SELL',
@@ -1060,8 +1060,8 @@ export class TradingEngine {
           stop_loss_price:  signal.stopLoss,
           take_profit_price: signal.takeProfit,
           limit_price:      entryLimit,
-          outside_rth:      tradeSession.isExtendedHours,
-          overnight:        tradeSession.isOvernight,
+          outside_rth:      false,  // regular hours only
+          overnight:        false,
           validate_only:    false,
         });
 
