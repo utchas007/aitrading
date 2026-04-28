@@ -1007,12 +1007,16 @@ export class TradingEngine {
       // Fetch IB positions once — used for both BUY and SELL guards below
       const ibPositions = await ib.getPositions();
 
-      // For BUY: skip if IB already holds shares of this symbol (avoids doubling up on
-      // positions the bot lost track of after a restart)
+      // For BUY: skip if IB already holds shares OR if bot already tracks an active position
       if (signal.action === 'buy') {
         const existing = ibPositions.find(p => p.symbol === signal.pair && p.position > 0);
         if (existing) {
-          logActivity.warning(`⚠️ Skipping BUY for ${signal.pair}: already holding ${existing.position} shares in IB (untracked position). Will wait for bot to re-enter after next exit.`);
+          logActivity.warning(`⚠️ Skipping BUY for ${signal.pair}: already holding ${existing.position} shares in IB (untracked position).`);
+          return;
+        }
+        const inMemory = Array.from(this.activePositions.values()).find(p => p.pair === signal.pair);
+        if (inMemory) {
+          logActivity.warning(`⚠️ Skipping BUY for ${signal.pair}: position already tracked in memory (close not yet confirmed by IB).`);
           return;
         }
       }
@@ -1196,9 +1200,11 @@ export class TradingEngine {
 
       // Fetch IB positions once for all symbols (used to detect native bracket closes)
       let ibPositions: Awaited<ReturnType<typeof ib.getPositions>> = [];
+      let ibPositionsSucceeded = false;
       if (this.config.autoExecute) {
         try {
           ibPositions = await ib.getPositions();
+          ibPositionsSucceeded = true; // call succeeded — empty array is a valid "no positions" state
         } catch {
           // Non-fatal; P&L update continues without close detection this cycle
         }
@@ -1254,7 +1260,7 @@ export class TradingEngine {
 
           // Guard 1: if IB returned an empty position list, it likely means a
           // connectivity blip — never treat "all gone" as "all closed".
-          const ibDataTrusted = ibPositions.length > 0;
+          const ibDataTrusted = ibPositionsSucceeded;
 
           // Guard 2: skip close detection for positions younger than 120 seconds.
           // IB can take up to a minute to reflect a new fill in getPositions().
