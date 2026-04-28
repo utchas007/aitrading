@@ -1185,15 +1185,28 @@ export class TradingEngine {
   }
 
   /**
-   * Check if AI + technicals are signalling an exit for an open position.
-   * Run at most once every 15 minutes per position to keep API usage reasonable.
+   * AI exit analysis — returns one of three coordinated actions:
+   *
+   *   'hold'    — conditions still bullish, keep position as-is
+   *   'tighten' — conditions turning bearish: move SL up close to current price
+   *               so IB fires the exit cleanly (no competing orders)
+   *   'exit'    — strongly bearish: cancel bracket immediately, market sell
+   *
+   * The AI never places a parallel sell order. It either adjusts the IB bracket
+   * (tighten) or cancels it before selling (exit). IB always does the execution.
    */
-  private async checkAIExit(position: ActivePosition): Promise<{ shouldExit: boolean; reason: string; confidence: number }> {
+  private async checkAIExit(position: ActivePosition): Promise<{
+    action: 'hold' | 'tighten' | 'exit';
+    reason: string;
+    confidence: number;
+    newStopPrice?: number;
+  }> {
     try {
       const bars = await getHistoricalPrices(position.pair, 1440);
-      if (bars.length < 20) return { shouldExit: false, reason: '', confidence: 0 };
+      if (bars.length < 20) return { action: 'hold', reason: 'insufficient data', confidence: 0 };
 
-      const technicals = analyzeTechnicalIndicators(bars);
+      const technicals  = analyzeTechnicalIndicators(bars);
+      const enhanced    = calculateEnhancedIndicators(bars);
       const currentPrice = bars[bars.length - 1].close;
 
       const technicalsForAI = {
@@ -1216,24 +1229,34 @@ export class TradingEngine {
         technicalsForAI,
       );
 
-      if (!aiAnalysis) return { shouldExit: false, reason: '', confidence: 0 };
+      if (!aiAnalysis) return { action: 'hold', reason: 'AI unavailable', confidence: 0 };
 
       const techBearish = technicals.overallSignal === 'sell' || technicals.overallSignal === 'strong_sell';
       const aiSell      = aiAnalysis.signal === 'SELL';
       const aiConf: number = aiAnalysis.confidence ?? 0;
+      const reasoning   = aiAnalysis.reasoning?.slice(0, 120) ?? aiAnalysis.sentiment ?? '';
+      const reason      = `AI: ${aiAnalysis.sentiment} ${aiConf}% | Tech: ${technicals.overallSignal} | ${reasoning}`;
 
-      // Exit if AI strongly says sell (80%+) OR AI says sell (65%+) AND technicals confirm
-      const shouldExit = (aiSell && aiConf >= 80) || (aiSell && aiConf >= 65 && techBearish);
-      const reasoning  = aiAnalysis.reasoning?.slice(0, 120) ?? aiAnalysis.sentiment ?? '';
+      // Strongly bearish (80%+) → exit immediately, cancel bracket first
+      if (aiSell && aiConf >= 80) {
+        return { action: 'exit', reason, confidence: aiConf };
+      }
 
-      return {
-        shouldExit,
-        reason:     `AI: ${aiAnalysis.sentiment} ${aiConf}% | Tech: ${technicals.overallSignal} | ${reasoning}`,
-        confidence: aiConf,
-      };
+      // Moderately bearish (65%+) + technicals confirm → tighten stop via IB bracket
+      // New SL = current price minus half an ATR (locks in most of current P&L)
+      if (aiSell && aiConf >= 65 && techBearish) {
+        const atrValue = (enhanced.atrPercent / 100) * currentPrice;
+        const newStopPrice = parseFloat((currentPrice - atrValue * 0.5).toFixed(2));
+        // Only tighten if the new stop is actually higher than the current stop
+        if (newStopPrice > position.stopLoss) {
+          return { action: 'tighten', reason, confidence: aiConf, newStopPrice };
+        }
+      }
+
+      return { action: 'hold', reason, confidence: aiConf };
     } catch (e) {
       log.warn('AI exit check failed', { pair: position.pair, error: String(e) });
-      return { shouldExit: false, reason: '', confidence: 0 };
+      return { action: 'hold', reason: '', confidence: 0 };
     }
   }
 
@@ -1550,15 +1573,22 @@ export class TradingEngine {
             }
 
             // ── AI-driven exit check (every 15 min, after 30 min open) ──────────
+            // Three coordinated actions — AI adjusts the IB bracket, never competes with it:
+            //   hold    → do nothing
+            //   tighten → move SL up via new OCA so IB fires the exit cleanly
+            //   exit    → cancel bracket first, then market sell
             const AI_EXIT_INTERVAL_MS = 15 * 60 * 1000;
             const exitCheckDue = Date.now() - (position.lastExitCheckAt ?? 0) >= AI_EXIT_INTERVAL_MS;
             const positionOldEnough = (Date.now() - position.timestamp) >= 30 * 60 * 1000;
             if (exitCheckDue && positionOldEnough) {
               position.lastExitCheckAt = Date.now();
               const exitCheck = await this.checkAIExit(position);
-              logActivity.info(`🤖 AI exit check — ${position.pair} | ${exitCheck.shouldExit ? '🔴 EXIT SIGNAL' : '🟢 Hold'} | Confidence: ${exitCheck.confidence}%`);
-              if (exitCheck.shouldExit) {
-                logActivity.warning(`🔴 AI exit triggered — ${position.pair} | P&L: ${position.pnlPercent.toFixed(1)}% ($${position.pnl.toFixed(2)}) | ${exitCheck.reason}`);
+              const actionIcon = exitCheck.action === 'exit' ? '🔴' : exitCheck.action === 'tighten' ? '🟡' : '🟢';
+              logActivity.info(`🤖 AI exit check — ${position.pair} | ${actionIcon} ${exitCheck.action.toUpperCase()} | Confidence: ${exitCheck.confidence}% | ${exitCheck.reason.slice(0, 80)}`);
+
+              if (exitCheck.action === 'exit') {
+                // Strongly bearish — cancel bracket first, then market sell (no competing orders)
+                logActivity.warning(`🔴 AI exit — ${position.pair} | P&L: ${position.pnlPercent.toFixed(1)}% ($${position.pnl.toFixed(2)}) | ${exitCheck.reason}`);
                 try {
                   if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
                   if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
@@ -1597,6 +1627,36 @@ export class TradingEngine {
                   continue;
                 } catch (e) {
                   log.error('AI exit execution failed', { pair: position.pair, error: String(e) });
+                }
+
+              } else if (exitCheck.action === 'tighten' && exitCheck.newStopPrice) {
+                // Moderately bearish — tighten the stop via IB so IB fires the exit cleanly
+                logActivity.warning(`🟡 AI tightening stop — ${position.pair} | SL: $${position.stopLoss.toFixed(2)} → $${exitCheck.newStopPrice.toFixed(2)} | ${exitCheck.reason}`);
+                try {
+                  if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
+                  if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
+                  await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
+                  const remainingShares = position.volume;
+                  const oca = await ib.placeOcaOrder({
+                    symbol:     position.pair,
+                    action:     position.type === 'buy' ? 'SELL' : 'BUY',
+                    quantity:   remainingShares,
+                    stop_price: exitCheck.newStopPrice,
+                    limit_price: position.takeProfit,
+                  });
+                  position.stopLoss  = exitCheck.newStopPrice;
+                  position.slOrderId = oca.stop_order_id  ?? position.slOrderId;
+                  position.tpOrderId = oca.limit_order_id ?? position.tpOrderId;
+                  if (position.dbTradeId) {
+                    import('./db').then(({ prisma }) =>
+                      prisma.trade.update({
+                        where: { id: position.dbTradeId },
+                        data:  { stopLoss: exitCheck.newStopPrice, slOrderId: position.slOrderId, tpOrderId: position.tpOrderId },
+                      })
+                    ).catch(e => log.error('DB update failed on AI stop tighten', { error: String(e) }));
+                  }
+                } catch (e) {
+                  log.error('AI stop tighten failed', { pair: position.pair, error: String(e) });
                 }
               }
             }
