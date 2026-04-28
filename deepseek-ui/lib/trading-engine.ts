@@ -1296,6 +1296,8 @@ export class TradingEngine {
             }
 
             this.activePositions.delete(txid);
+            // Set cooldown so the bot doesn't immediately re-enter the same symbol
+            this.lastTradeTime.set(position.pair, Date.now());
           } else if (!ibPos && !ibDataTrusted) {
             log.warn('Close detection skipped — IB returned empty positions list (connectivity blip?)', { pair: position.pair });
           } else if (!ibPos && !positionMature) {
@@ -1531,6 +1533,7 @@ export class TradingEngine {
                   position.pair,
                 );
                 this.activePositions.delete(txid);
+                this.lastTradeTime.set(position.pair, Date.now());
               } catch (e) {
                 log.error('Time-based exit failed', { pair: position.pair, error: String(e) });
               }
@@ -1556,6 +1559,7 @@ export class TradingEngine {
             log.info('Paper position closed', { pair: position.pair, reason: shouldClose.reason, entry: position.entryPrice.toFixed(2), current: position.currentPrice.toFixed(2), pnl: position.pnl.toFixed(2) });
             logActivity.completed(`✅ Paper position closed — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${shouldClose.reason}`);
             this.activePositions.delete(txid);
+            this.lastTradeTime.set(position.pair, Date.now());
           }
         }
       }
