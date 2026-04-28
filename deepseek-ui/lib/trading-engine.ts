@@ -133,6 +133,8 @@ export interface ActivePosition {
   partialPnl?: number;        // Realized P&L from the partial exit
   // Ratchet cooldown — prevents duplicate OCA orders from rapid consecutive ratchets
   lastRatchetAt?: number;     // Timestamp of last successful trailing-stop ratchet
+  // AI-driven exit check — checked every 15 minutes per position
+  lastExitCheckAt?: number;
 }
 
 export interface TradingEngineConfig {
@@ -1183,6 +1185,59 @@ export class TradingEngine {
   }
 
   /**
+   * Check if AI + technicals are signalling an exit for an open position.
+   * Run at most once every 15 minutes per position to keep API usage reasonable.
+   */
+  private async checkAIExit(position: ActivePosition): Promise<{ shouldExit: boolean; reason: string; confidence: number }> {
+    try {
+      const bars = await getHistoricalPrices(position.pair, 1440);
+      if (bars.length < 20) return { shouldExit: false, reason: '', confidence: 0 };
+
+      const technicals = analyzeTechnicalIndicators(bars);
+      const currentPrice = bars[bars.length - 1].close;
+
+      const technicalsForAI = {
+        rsi:           technicals.rsi,
+        rsiSignal:     technicals.rsiSignal,
+        macd:          technicals.macd.trend,
+        overallSignal: technicals.overallSignal,
+        confidence:    technicals.confidence,
+        price:         currentPrice,
+        change:        bars.length >= 2
+          ? (((currentPrice - bars[bars.length - 2].close) / bars[bars.length - 2].close) * 100).toFixed(2)
+          : '0.00',
+      };
+
+      const news = await this.fetchWorldMonitorNews();
+      const aiAnalysis = await this.getAISentimentAnalysis(
+        position.pair,
+        news,
+        { [position.pair]: { price: currentPrice, volume: 0, change24h: '0' } },
+        technicalsForAI,
+      );
+
+      if (!aiAnalysis) return { shouldExit: false, reason: '', confidence: 0 };
+
+      const techBearish = technicals.overallSignal === 'sell' || technicals.overallSignal === 'strong_sell';
+      const aiSell      = aiAnalysis.signal === 'SELL';
+      const aiConf: number = aiAnalysis.confidence ?? 0;
+
+      // Exit if AI strongly says sell (80%+) OR AI says sell (65%+) AND technicals confirm
+      const shouldExit = (aiSell && aiConf >= 80) || (aiSell && aiConf >= 65 && techBearish);
+      const reasoning  = aiAnalysis.reasoning?.slice(0, 120) ?? aiAnalysis.sentiment ?? '';
+
+      return {
+        shouldExit,
+        reason:     `AI: ${aiAnalysis.sentiment} ${aiConf}% | Tech: ${technicals.overallSignal} | ${reasoning}`,
+        confidence: aiConf,
+      };
+    } catch (e) {
+      log.warn('AI exit check failed', { pair: position.pair, error: String(e) });
+      return { shouldExit: false, reason: '', confidence: 0 };
+    }
+  }
+
+  /**
    * Update active positions: refresh P&L from live prices and detect IB-native closes.
    *
    * When autoExecute=true, SL/TP are native IB bracket orders — IB closes the position
@@ -1490,6 +1545,58 @@ export class TradingEngine {
                 } catch (e) {
                   // SL cancel threw — position still protected by old stop, skip this cycle
                   log.warn('Ratchet aborted — old SL still active on IB', { pair: position.pair, error: String(e) });
+                }
+              }
+            }
+
+            // ── AI-driven exit check (every 15 min, after 30 min open) ──────────
+            const AI_EXIT_INTERVAL_MS = 15 * 60 * 1000;
+            const exitCheckDue = Date.now() - (position.lastExitCheckAt ?? 0) >= AI_EXIT_INTERVAL_MS;
+            const positionOldEnough = (Date.now() - position.timestamp) >= 30 * 60 * 1000;
+            if (exitCheckDue && positionOldEnough) {
+              position.lastExitCheckAt = Date.now();
+              const exitCheck = await this.checkAIExit(position);
+              logActivity.info(`🤖 AI exit check — ${position.pair} | ${exitCheck.shouldExit ? '🔴 EXIT SIGNAL' : '🟢 Hold'} | Confidence: ${exitCheck.confidence}%`);
+              if (exitCheck.shouldExit) {
+                logActivity.warning(`🔴 AI exit triggered — ${position.pair} | P&L: ${position.pnlPercent.toFixed(1)}% ($${position.pnl.toFixed(2)}) | ${exitCheck.reason}`);
+                try {
+                  if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
+                  if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
+                  await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
+                  await ib.placeOrder({
+                    symbol:        position.pair,
+                    action:        position.type === 'buy' ? 'SELL' : 'BUY',
+                    quantity:      position.volume,
+                    order_type:    'MKT',
+                    validate_only: false,
+                  });
+                  this.dailyRealizedPnl += position.pnl;
+                  if (position.dbTradeId) {
+                    import('./db').then(({ prisma }) =>
+                      prisma.trade.update({
+                        where: { id: position.dbTradeId },
+                        data: {
+                          status:      'closed',
+                          closedAt:    new Date(),
+                          exitPrice:   position.currentPrice,
+                          pnl:         position.pnl,
+                          pnlPercent:  position.pnlPercent,
+                          closeReason: 'ai_exit',
+                        },
+                      })
+                    ).catch(e => log.error('DB update failed on AI exit', { error: String(e) }));
+                  }
+                  saveNotification(
+                    'trade_closed',
+                    `AI Exit — ${position.pair}`,
+                    `AI signalled exit at ${position.pnlPercent.toFixed(1)}% P&L | $${position.pnl.toFixed(2)} | ${exitCheck.reason.slice(0, 100)}`,
+                    position.pair,
+                  );
+                  this.activePositions.delete(txid);
+                  this.lastTradeTime.set(position.pair, Date.now());
+                  continue;
+                } catch (e) {
+                  log.error('AI exit execution failed', { pair: position.pair, error: String(e) });
                 }
               }
             }
