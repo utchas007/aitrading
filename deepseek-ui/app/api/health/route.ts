@@ -35,6 +35,7 @@ export const dynamic = 'force-dynamic';
 const IB_SERVICE_URL     = process.env.IB_SERVICE_URL     || 'http://localhost:8765';
 const OLLAMA_API_URL     = process.env.OLLAMA_API_URL     || 'http://localhost:11434';
 const WORLDMONITOR_URL   = process.env.WORLDMONITOR_URL   || 'http://localhost:3000';
+const WORLDMONITOR_KEY   = process.env.WORLDMONITOR_KEY   || 'trading-bot-internal';
 
 interface ServiceHealth {
   status: 'ok' | 'error' | 'unavailable';
@@ -106,9 +107,10 @@ async function checkWorldMonitor(): Promise<ServiceHealth> {
   const t = Date.now();
   try {
     const res = await fetch(`${WORLDMONITOR_URL}/api/indices`, {
+      headers: { 'X-WorldMonitor-Key': WORLDMONITOR_KEY },
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
-    if (!res.ok) return { status: 'error', latencyMs: Date.now() - t, error: `HTTP ${res.status}` };
+    if (!res.ok) return { status: 'unavailable', latencyMs: Date.now() - t, error: `HTTP ${res.status}` };
     return { status: 'ok', latencyMs: Date.now() - t };
   } catch (err: unknown) {
     // World Monitor is optional — return 'unavailable' (not 'error') so overall status doesn't degrade

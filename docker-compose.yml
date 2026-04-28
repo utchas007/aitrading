@@ -108,6 +108,7 @@ services:
       OLLAMA_API_URL:      ${OLLAMA_API_URL:-http://host.docker.internal:11500}
       OLLAMA_MODEL:        ${OLLAMA_MODEL:-deepseek-r1:14b}
       WORLDMONITOR_URL:    ${WORLDMONITOR_URL:-http://worldmonitor:3000}
+      WORLDMONITOR_KEY:    trading-bot-internal
       NEXTJS_URL:          http://nextjs:3000
       KRAKEN_API_KEY:      ${KRAKEN_API_KEY}
       KRAKEN_PRIVATE_KEY:  ${KRAKEN_PRIVATE_KEY}
@@ -155,14 +156,15 @@ services:
     ports:
       - "3000:3000"
     environment:
-      OLLAMA_API_URL:       ${OLLAMA_API_URL:-http://host.docker.internal:11500}
-      OLLAMA_MODEL:         ${OLLAMA_MODEL:-deepseek-r1:14b}
-      FINNHUB_API_KEY:      d7h1hv1r01qmqj474m4gd7h1hv1r01qmqj474m50
-      VITE_FINNHUB_API_KEY: d7h1hv1r01qmqj474m4gd7h1hv1r01qmqj474m50
-      EIA_API_KEY:          S4MC5CFni2Vuw4PTrr0pqgF9kIWD9USr9bTgdRt7
-      FRED_API_KEY:         637673e0ab20b7228d8918e5900bd4bf
-      VITE_VARIANT:         full
+      OLLAMA_API_URL:           ${OLLAMA_API_URL:-http://host.docker.internal:11500}
+      OLLAMA_MODEL:             ${OLLAMA_MODEL:-deepseek-r1:14b}
+      FINNHUB_API_KEY:          d7h1hv1r01qmqj474m4gd7h1hv1r01qmqj474m50
+      VITE_FINNHUB_API_KEY:     d7h1hv1r01qmqj474m4gd7h1hv1r01qmqj474m50
+      EIA_API_KEY:              S4MC5CFni2Vuw4PTrr0pqgF9kIWD9USr9bTgdRt7
+      FRED_API_KEY:             637673e0ab20b7228d8918e5900bd4bf
+      VITE_VARIANT:             full
       VITE_MAP_INTERACTION_MODE: 3d
+      WORLDMONITOR_VALID_KEYS:  trading-bot-internal
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

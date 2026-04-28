@@ -9,6 +9,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const WORLDMONITOR_BASE_URL = process.env.WORLDMONITOR_URL || 'http://localhost:3000';
+const WORLDMONITOR_KEY      = process.env.WORLDMONITOR_KEY || 'trading-bot-internal';
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -29,6 +30,7 @@ export async function GET(req: NextRequest) {
       headers: {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'User-Agent': 'Mozilla/5.0 (compatible; TradingBot/1.0)',
+        'X-WorldMonitor-Key': WORLDMONITOR_KEY,
       },
     });
 

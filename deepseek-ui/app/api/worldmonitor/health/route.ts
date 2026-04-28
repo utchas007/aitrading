@@ -6,6 +6,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const WORLDMONITOR_URL = process.env.WORLDMONITOR_URL || 'http://localhost:3000';
+const WORLDMONITOR_KEY = process.env.WORLDMONITOR_KEY || 'trading-bot-internal';
 
 interface HealthStatus {
   connected: boolean;
@@ -40,6 +41,7 @@ export async function GET(req: NextRequest) {
   try {
     // Check if World Monitor is reachable
     const wmCheck = await fetch(WORLDMONITOR_URL, {
+      headers: { 'X-WorldMonitor-Key': WORLDMONITOR_KEY },
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     
