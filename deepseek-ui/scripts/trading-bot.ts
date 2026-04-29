@@ -19,7 +19,7 @@ const log = createLogger('trading-bot');
 const CONFIG = {
   pairs: ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META', 'AMD'],
   autoExecute: true,  // LIVE TRADING
-  minConfidence: 75,
+  minConfidence: 60,
   maxPositions: 5,
   riskPerTrade: 0.05,
   stopLossPercent: 0.05,

@@ -109,7 +109,7 @@ export const AGREEMENT_CONFIDENCE_BOOST = 10;
 // ─── Micro-filter thresholds ──────────────────────────────────────────────────
 
 /** Volume must be at least this multiple of the average to confirm a signal. */
-export const VOLUME_CONFIRMATION_RATIO = 1.3;
+export const VOLUME_CONFIRMATION_RATIO = 1.0;
 
 /**
  * BB-below: RSI must be below this to confirm a valid long entry.

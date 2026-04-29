@@ -807,13 +807,21 @@ export class TradingEngine {
     }
 
     // ── Micro filter 1: Volume confirmation ──────────────────────────────────
-    // Require at least 1.3× average volume to confirm the move is real.
+    // IB `volume` is intraday-accumulated (resets at 9:30 AM ET each day), but
+    // the historical OHLC average is a full-day total. Scale expected average by
+    // the fraction of the trading day elapsed so early-morning volume isn't
+    // systematically rejected. Trading day = 390 min (9:30–4:00 PM ET).
     if (action !== 'hold') {
-      const volumeRatio = technicalSignals.volume.average > 0
-        ? technicalSignals.volume.current / technicalSignals.volume.average
-        : 1;
+      let volumeRatio = 1;
+      if (technicalSignals.volume.average > 0) {
+        const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+        const minSinceOpen = Math.max(1, (etNow.getHours() * 60 + etNow.getMinutes()) - 570); // 570 = 9:30
+        const dayFraction  = Math.min(1, minSinceOpen / 390);
+        const adjustedAvg  = technicalSignals.volume.average * dayFraction;
+        volumeRatio = adjustedAvg > 0 ? technicalSignals.volume.current / adjustedAvg : 1;
+      }
       if (volumeRatio < VOLUME_CONFIRMATION_RATIO) {
-        logActivity.warning(`${pair}: Weak volume (${volumeRatio.toFixed(1)}× avg) — insufficient conviction. Switching to HOLD.`);
+        logActivity.warning(`${pair}: Weak volume (${volumeRatio.toFixed(1)}× time-adj avg) — insufficient conviction. Switching to HOLD.`);
         action = 'hold';
       }
     }
@@ -1231,29 +1239,83 @@ export class TradingEngine {
 
       if (!aiAnalysis) return { action: 'hold', reason: 'AI unavailable', confidence: 0 };
 
-      const techBearish = technicals.overallSignal === 'sell' || technicals.overallSignal === 'strong_sell';
-      const aiSell      = aiAnalysis.signal === 'SELL';
       const aiConf: number = aiAnalysis.confidence ?? 0;
       const reasoning   = aiAnalysis.reasoning?.slice(0, 120) ?? aiAnalysis.sentiment ?? '';
       const reason      = `AI: ${aiAnalysis.sentiment} ${aiConf}% | Tech: ${technicals.overallSignal} | ${reasoning}`;
 
-      // Strongly bearish (80%+) → exit immediately, cancel bracket first
-      if (aiSell && aiConf >= 80) {
-        return { action: 'exit', reason, confidence: aiConf };
+      // ── Bearish score for technicals (0–100, higher = more bearish) ─────────
+      let techBearishScore: number;
+      const sig = technicals.overallSignal;
+      if (sig === 'strong_sell' || sig === 'sell') {
+        techBearishScore = technicals.confidence;
+      } else if (sig === 'neutral') {
+        techBearishScore = 50;
+      } else {
+        // buy / strong_buy — technicals are bullish, flip score
+        techBearishScore = 100 - technicals.confidence;
       }
 
-      // Moderately bearish (65%+) + technicals confirm → tighten stop via IB bracket
-      // New SL = current price minus half an ATR (locks in most of current P&L)
-      if (aiSell && aiConf >= 65 && techBearish) {
+      // Enhanced-indicator adjustments (overbought / distribution signals)
+      if (technicals.rsi > 75)              techBearishScore = Math.min(100, techBearishScore + 10);
+      if (enhanced.stochRSI?.k > 80)                        techBearishScore = Math.min(100, techBearishScore + 10);
+      if (enhanced.obv?.trend === 'falling')                techBearishScore = Math.min(100, techBearishScore + 5);
+      if (enhanced.ichimoku?.signal === 'bearish')          techBearishScore = Math.min(100, techBearishScore + 5);
+
+      // ── Bearish score for AI (0–100, higher = more bearish) ─────────────────
+      let aiBearishScore: number;
+      if (aiAnalysis.signal === 'SELL') {
+        aiBearishScore = aiConf;
+      } else if (aiAnalysis.signal === 'BUY') {
+        aiBearishScore = 100 - aiConf;
+      } else {
+        aiBearishScore = 50; // HOLD
+      }
+
+      // ── Blend: 60% technicals + 40% AI (mirrors entry formula) ─────────────
+      let blendedScore = Math.round(techBearishScore * TECHNICAL_WEIGHT + aiBearishScore * AI_WEIGHT);
+
+      const techBearish = sig === 'sell' || sig === 'strong_sell';
+      const aiBearish   = aiAnalysis.signal === 'SELL';
+
+      if (techBearish && aiBearish) {
+        // Both agree bearish → agreement boost
+        blendedScore = Math.min(100, blendedScore + AGREEMENT_CONFIDENCE_BOOST);
+      } else if ((sig === 'buy' || sig === 'strong_buy') && aiAnalysis.signal === 'BUY') {
+        // Both clearly bullish → cap at 55 (no exit action)
+        blendedScore = Math.min(blendedScore, 55);
+      } else if (techBearish && aiAnalysis.signal === 'BUY') {
+        // Direct conflict → cap at 55
+        blendedScore = Math.min(blendedScore, 55);
+      } else if ((sig === 'buy' || sig === 'strong_buy') && aiBearish) {
+        // Direct conflict → cap at 55
+        blendedScore = Math.min(blendedScore, 55);
+      }
+
+      log.info(`AI exit blend for ${position.pair}`, {
+        techBearishScore,
+        aiBearishScore,
+        blendedScore,
+        techSignal: sig,
+        aiSignal: aiAnalysis.signal,
+      });
+
+      // ── Thresholds ──────────────────────────────────────────────────────────
+      if (blendedScore >= 75) {
+        // Strongly bearish → cancel bracket and market sell immediately
+        return { action: 'exit', reason, confidence: blendedScore };
+      }
+
+      if (blendedScore >= 60) {
+        // Moderately bearish → tighten stop via IB bracket
+        // New SL = current price minus half an ATR (locks in most of current P&L)
         const atrValue = (enhanced.atrPercent / 100) * currentPrice;
         const newStopPrice = parseFloat((currentPrice - atrValue * 0.5).toFixed(2));
-        // Only tighten if the new stop is actually higher than the current stop
         if (newStopPrice > position.stopLoss) {
-          return { action: 'tighten', reason, confidence: aiConf, newStopPrice };
+          return { action: 'tighten', reason, confidence: blendedScore, newStopPrice };
         }
       }
 
-      return { action: 'hold', reason, confidence: aiConf };
+      return { action: 'hold', reason, confidence: blendedScore };
     } catch (e) {
       log.warn('AI exit check failed', { pair: position.pair, error: String(e) });
       return { action: 'hold', reason: '', confidence: 0 };
