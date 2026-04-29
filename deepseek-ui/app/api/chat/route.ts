@@ -647,7 +647,7 @@ async function fetchCryptoContext(): Promise<string> {
         TIMEOUTS.HEALTH_MS + 1000, { success: false }
       ),
       fetchWithTimeout(
-        fetch('http://localhost:3000/api/conflict/v1/worldmonitor.conflict.v1.ConflictService/ListConflicts', {
+        fetch(`${process.env.WORLDMONITOR_URL || 'http://localhost:3000'}/api/conflict/v1/worldmonitor.conflict.v1.ConflictService/ListConflicts`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ limit: 5 }),
