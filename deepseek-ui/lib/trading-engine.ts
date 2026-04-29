@@ -606,9 +606,10 @@ export class TradingEngine {
    * Fetch news from World Monitor
    */
   private async fetchWorldMonitorNews(): Promise<any[]> {
-    const worldMonitorUrl = process.env.WORLDMONITOR_URL || 'http://localhost:3000';
+    // Use the Next.js API endpoint, not the WorldMonitor Vite SPA (which only returns HTML)
+    const nextjsUrl = process.env.NEXTJS_URL || 'http://localhost:3001';
     try {
-      const response = await fetch(`${worldMonitorUrl}/api/worldmonitor/news`);
+      const response = await fetch(`${nextjsUrl}/api/worldmonitor/news?category=markets&limit=10`);
       if (!response.ok) {
         log.warn('Failed to fetch World Monitor news, continuing with technical analysis only');
         return [];

@@ -176,7 +176,8 @@ export async function fetchGlobalIndices(): Promise<GlobalIndex[]> {
  */
 export async function fetchBreakingNews(limit = 10): Promise<string[]> {
   try {
-    const res = await fetch(`http://localhost:3001/api/worldmonitor/news?category=markets&limit=${limit}`, {
+    const nextjsUrl = process.env.NEXTJS_URL || 'http://localhost:3001';
+    const res = await fetch(`${nextjsUrl}/api/worldmonitor/news?category=markets&limit=${limit}`, {
       signal: AbortSignal.timeout(TIMEOUTS.HEALTH_MS),
     });
     
