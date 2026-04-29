@@ -57,13 +57,26 @@ export async function GET(req: NextRequest) {
       buyingPower:   s.buyingPower,
     }));
 
+    const values = snapshots.map(s => s.totalValue);
+    const currentValue  = values[values.length - 1] ?? 0;
+    const highestValue  = values.length > 0 ? Math.max(...values) : 0;
+    const lowestValue   = values.length > 0 ? Math.min(...values) : 0;
+
     return NextResponse.json({
       success: true,
       history,
+      stats: {
+        currentValue,
+        highestValue,
+        lowestValue,
+        pnl,
+        pnlPercent,
+        count: snapshots.length,
+      },
       summary: {
         count:      snapshots.length,
         firstValue: snapshots[0]?.totalValue || 0,
-        lastValue:  snapshots[snapshots.length - 1]?.totalValue || 0,
+        lastValue:  currentValue,
         pnl,
         pnlPercent,
         days,

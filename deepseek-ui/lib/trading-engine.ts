@@ -2075,7 +2075,8 @@ export class TradingEngine {
    */
   private async savePortfolioSnapshot(): Promise<void> {
     try {
-      await fetch('http://localhost:3001/api/portfolio/snapshot', {
+      const nextjsUrl = process.env.NEXTJS_URL || 'http://localhost:3001';
+      await fetch(`${nextjsUrl}/api/portfolio/snapshot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
