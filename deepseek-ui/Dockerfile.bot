@@ -1,0 +1,15 @@
+# AI Trading Bot — standalone TypeScript process
+FROM node:20-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache libc6-compat
+
+COPY package.json package-lock.json ./
+RUN npm ci --prefer-offline
+
+COPY . .
+
+EXPOSE 3003
+
+CMD ["npx", "tsx", "scripts/trading-bot.ts"]

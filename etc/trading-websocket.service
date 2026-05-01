@@ -1,0 +1,22 @@
+[Unit]
+Description=Trading WebSocket Server
+After=network.target trading-dashboard.service
+Wants=trading-dashboard.service
+
+[Service]
+Type=simple
+User=aiserver
+WorkingDirectory=/home/aiserver/Trading Project/deepseek-ui
+ExecStart=/home/aiserver/.nvm/versions/node/v24.14.1/bin/npm run ws
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/aiserver/Trading Project/websocket.log
+StandardError=append:/home/aiserver/Trading Project/websocket.log
+EnvironmentFile=/home/aiserver/Trading Project/deepseek-ui/.env.local
+Environment=NODE_ENV=development
+Environment=PATH=/home/aiserver/.nvm/versions/node/v24.14.1/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NEXTJS_URL=http://localhost:3001
+Environment=IB_SERVICE_URL=http://localhost:8765
+
+[Install]
+WantedBy=multi-user.target

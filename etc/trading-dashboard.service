@@ -1,0 +1,20 @@
+[Unit]
+Description=Trading Dashboard (Next.js)
+After=network.target trading-ib.service
+Wants=trading-ib.service
+
+[Service]
+Type=simple
+User=aiserver
+WorkingDirectory=/home/aiserver/Trading Project/deepseek-ui
+ExecStart=/home/aiserver/.nvm/versions/node/v24.14.1/bin/npm run dev
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/aiserver/Trading Project/nextjs.log
+StandardError=append:/home/aiserver/Trading Project/nextjs.log
+EnvironmentFile=/home/aiserver/Trading Project/deepseek-ui/.env.local
+Environment=NODE_ENV=development
+Environment=PATH=/home/aiserver/.nvm/versions/node/v24.14.1/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

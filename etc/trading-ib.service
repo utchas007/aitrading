@@ -1,0 +1,18 @@
+[Unit]
+Description=Trading IB Python Service
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=aiserver
+WorkingDirectory=/home/aiserver/Trading Project
+ExecStart=/usr/bin/python3 /home/aiserver/Trading Project/ib_service.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/aiserver/Trading Project/ib_service.log
+StandardError=append:/home/aiserver/Trading Project/ib_service.log
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
