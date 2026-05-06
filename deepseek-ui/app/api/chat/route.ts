@@ -519,12 +519,27 @@ const WATCHLIST_STOCKS = ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'GOOGL', 'AMZN', 'META
 /**
  * Fetch stock data from Interactive Brokers and compute technicals
  */
-// Fetch with hard timeout — never blocks the chat
+// Fetch with hard timeout — never blocks the chat.
+// Important: we attach a rejection handler to the source promise so a late
+// failure after timeout does not become an unhandled rejection.
 async function fetchWithTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>(resolve => setTimeout(() => resolve(fallback), ms)),
-  ]);
+  let timer: NodeJS.Timeout | null = null;
+
+  const timeoutPromise = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+
+  try {
+    return await Promise.race([
+      promise.catch((error) => {
+        log.warn('Timed/failed dependency call in chat context', { error: String(error) });
+        return fallback;
+      }),
+      timeoutPromise,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function fetchStockContext(): Promise<string> {

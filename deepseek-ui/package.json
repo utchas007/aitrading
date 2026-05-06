@@ -10,6 +10,7 @@
     "bot": "npx tsx scripts/trading-bot.ts",
     "ws": "npx tsx websocket-server.ts",
     "dev:all": "npm run ws & npm run dev",
+    "validate:system": "bash scripts/system-validate.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepare": "husky"

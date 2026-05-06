@@ -30,7 +30,7 @@ export default function PortfolioChart({ height = 300 }: PortfolioChartProps) {
       setLoading(true);
       setError(null);
 
-      const res = await fetch('/api/portfolio/history?stats=true');
+      const res = await fetch('/api/portfolio/history?stats=true&days=30');
       const data = await readJsonSafely<any>(res, 'portfolio history');
 
       if (!data.success) {

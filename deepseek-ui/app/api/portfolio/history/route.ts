@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
     const since = new Date();
     since.setDate(since.getDate() - days);
 
-    const snapshots = await prisma.portfolioSnapshot.findMany({
+    let snapshots = await prisma.portfolioSnapshot.findMany({
       where:   { createdAt: { gte: since } },
       orderBy: { createdAt: 'asc' },
       take:    limit,
@@ -37,6 +37,27 @@ export async function GET(req: NextRequest) {
         buyingPower:   true,
       },
     });
+
+    // If the requested window has no rows (e.g. no snapshots in last 7d),
+    // fall back to the latest available history so the UI is not empty.
+    let fallbackUsed = false;
+    if (snapshots.length === 0) {
+      const latest = await prisma.portfolioSnapshot.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        select: {
+          id:            true,
+          createdAt:     true,
+          totalValue:    true,
+          cadCash:       true,
+          unrealizedPnl: true,
+          realizedPnl:   true,
+          buyingPower:   true,
+        },
+      });
+      snapshots = latest.reverse();
+      fallbackUsed = snapshots.length > 0;
+    }
 
     // Calculate P&L from first snapshot in the window
     let pnl = 0;
@@ -80,6 +101,7 @@ export async function GET(req: NextRequest) {
         pnl,
         pnlPercent,
         days,
+        fallbackUsed,
       },
     });
   } catch (error: any) {
