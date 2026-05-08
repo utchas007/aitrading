@@ -1319,7 +1319,7 @@ export class TradingEngine {
       return { action: 'hold', reason, confidence: blendedScore };
     } catch (e) {
       log.warn('AI exit check failed', { pair: position.pair, error: String(e) });
-      return { action: 'hold', reason: '', confidence: 0 };
+      return { action: 'hold', reason: 'AI check failed', confidence: 0 };
     }
   }
 
@@ -1411,8 +1411,46 @@ export class TradingEngine {
           const ibPos = ibPositions.find(p => p.symbol === position.pair && p.position > 0);
           if (!ibPos && ibDataTrusted && positionMature) {
             // IB no longer holds shares → bracket SL or TP fired
-            // Total P&L = remaining-half P&L + any locked partial P&L
-            const totalPnl = position.pnl + (position.partialPnl ?? 0);
+            // Total P&L = remaining-half P&L + any locked partial P&L.
+            // If currentPrice is stale (common right after restart/adoption), infer
+            // a better realized value to avoid misleading "$0.00" closes.
+            let inferredPnl = position.pnl;
+            if (Math.abs(inferredPnl) < 0.01) {
+              try {
+                const bars = await getHistoricalPrices(position.pair, 60);
+                if (bars.length > 0) {
+                  const lastClose = bars[bars.length - 1].close;
+                  const recomputed = position.type === 'buy'
+                    ? (lastClose - position.entryPrice) * position.volume
+                    : (position.entryPrice - lastClose) * position.volume;
+                  if (Math.abs(recomputed) >= 0.01) {
+                    inferredPnl = recomputed;
+                    position.currentPrice = lastClose;
+                    position.pnl = recomputed;
+                    position.pnlPercent = position.entryPrice > 0
+                      ? ((lastClose - position.entryPrice) / position.entryPrice) * 100
+                      : position.pnlPercent;
+                  }
+                }
+              } catch {
+                // keep original inferredPnl
+              }
+            }
+
+            if (Math.abs(inferredPnl) < 0.01) {
+              const priceRef = position.currentPrice;
+              const distToTp = Math.abs(priceRef - position.takeProfit);
+              const distToSl = Math.abs(priceRef - position.stopLoss);
+              const fallbackProfit = position.expectedProfitUSD ?? 0;
+              const fallbackLoss = position.expectedLossUSD ?? 0;
+              if (fallbackProfit > 0 || fallbackLoss > 0) {
+                inferredPnl = distToTp <= distToSl
+                  ? fallbackProfit
+                  : -fallbackLoss;
+              }
+            }
+
+            const totalPnl = inferredPnl + (position.partialPnl ?? 0);
             const closeReason = totalPnl > 0 ? 'take_profit' : totalPnl < 0 ? 'stop_loss' : 'unknown';
             const partialNote = position.partialPnl ? ` (incl. $${position.partialPnl.toFixed(2)} partial)` : '';
             log.info('IB bracket closed position', { pair: position.pair, closeReason, pnl: totalPnl.toFixed(2), pnlPct: position.pnlPercent.toFixed(2) });
@@ -1646,8 +1684,17 @@ export class TradingEngine {
             if (exitCheckDue && positionOldEnough) {
               position.lastExitCheckAt = Date.now();
               const exitCheck = await this.checkAIExit(position);
-              const actionIcon = exitCheck.action === 'exit' ? '🔴' : exitCheck.action === 'tighten' ? '🟡' : '🟢';
-              logActivity.info(`🤖 AI exit check — ${position.pair} | ${actionIcon} ${exitCheck.action.toUpperCase()} | Confidence: ${exitCheck.confidence}% | ${exitCheck.reason.slice(0, 80)}`);
+              const aiUnavailable =
+                exitCheck.action === 'hold' &&
+                exitCheck.confidence === 0 &&
+                (exitCheck.reason === 'AI unavailable' || exitCheck.reason === 'AI check failed');
+
+              if (aiUnavailable) {
+                logActivity.warning(`🤖 AI exit check skipped — ${position.pair} | ${exitCheck.reason}`);
+              } else {
+                const actionIcon = exitCheck.action === 'exit' ? '🔴' : exitCheck.action === 'tighten' ? '🟡' : '🟢';
+                logActivity.info(`🤖 AI exit check — ${position.pair} | ${actionIcon} ${exitCheck.action.toUpperCase()} | Confidence: ${exitCheck.confidence}% | ${exitCheck.reason.slice(0, 80)}`);
+              }
 
               if (exitCheck.action === 'exit') {
                 // Strongly bearish — cancel bracket first, then market sell (no competing orders)
@@ -1823,9 +1870,6 @@ export class TradingEngine {
           expectedProfitUSD: true, expectedLossUSD: true, riskRewardRatio: true,
         },
       });
-
-      if (openTrades.length === 0) return;
-
       logActivity.info(`🔄 Found ${openTrades.length} open trade(s) in DB — verifying with IB...`);
 
       const ib = createIBClient();
@@ -1845,6 +1889,7 @@ export class TradingEngine {
 
       let recovered = 0;
       let markedClosed = 0;
+      let adopted = 0;
 
       for (const trade of openTrades) {
         const ibPos = ibPositions.find(p => p.symbol === trade.pair && p.position > 0);
@@ -1916,8 +1961,126 @@ export class TradingEngine {
         }
       }
 
-      if (recovered > 0 || markedClosed > 0) {
-        logActivity.info(`🔄 Recovery complete: ${recovered} position(s) restored, ${markedClosed} marked closed (offline)`);
+      // Adopt any leftover live IB positions that are not represented in DB open trades.
+      // This handles manual fills / orphaned positions after restarts so the bot can manage exits.
+      const trackedPairs = new Set(
+        openTrades.map(t => t.pair.toUpperCase())
+      );
+
+      for (const ibPos of ibPositions) {
+        const symbol = ibPos.symbol.toUpperCase();
+        if (trackedPairs.has(symbol)) continue;
+
+        // For now adopt only long stock positions; short/other assets need separate handling.
+        if (ibPos.position <= 0) continue;
+        if (ibPos.sec_type !== 'STK') continue;
+
+        const entryPrice = ibPos.avg_cost;
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+          logActivity.warning(`⚠️ Could not adopt ${symbol}: invalid avg_cost (${ibPos.avg_cost})`);
+          continue;
+        }
+
+        const volume = ibPos.position;
+        const stopLoss = parseFloat((entryPrice * (1 - this.config.stopLossPercent)).toFixed(2));
+        const takeProfit = parseFloat((entryPrice * (1 + this.config.takeProfitPercent)).toFixed(2));
+        const expectedProfitUSD = parseFloat((volume * (takeProfit - entryPrice)).toFixed(2));
+        const expectedLossUSD = parseFloat((volume * (entryPrice - stopLoss)).toFixed(2));
+        const riskRewardRatio = expectedLossUSD > 0
+          ? parseFloat((expectedProfitUSD / expectedLossUSD).toFixed(4))
+          : null;
+
+        let slOrderId: number | undefined;
+        let tpOrderId: number | undefined;
+
+        // Place native IB protection immediately for adopted positions so they
+        // are protected even if the bot restarts again.
+        // Only do this in live execution mode.
+        const hasExistingSellOrders = ibOrders.some(
+          o => o.symbol === symbol &&
+               o.action === 'SELL' &&
+               (o.status === 'Submitted' || o.status === 'PreSubmitted')
+        );
+
+        if (this.config.autoExecute) {
+          if (hasExistingSellOrders) {
+            logActivity.info(`🛡️ ${symbol}: existing IB SELL orders detected — keeping current native protection`);
+          } else {
+            try {
+              const oca = await ib.placeOcaOrder({
+                symbol,
+                action: 'SELL',
+                quantity: volume,
+                stop_price: stopLoss,
+                limit_price: takeProfit,
+                validate_only: false,
+              });
+              slOrderId = oca.stop_order_id;
+              tpOrderId = oca.limit_order_id;
+              const slInfo = slOrderId ? `SL order #${slOrderId}` : 'SL order created';
+              const tpInfo = tpOrderId ? `TP order #${tpOrderId}` : 'TP order created';
+              logActivity.info(`🛡️ Adopted ${symbol} protection placed: ${slInfo} | ${tpInfo}`);
+            } catch (e) {
+              logActivity.error(`❌ Failed to place native protection for adopted ${symbol}: ${e}`);
+            }
+          }
+        } else {
+          logActivity.warning(`⚠️ ${symbol} adopted in validation mode — native IB SL/TP not placed (autoExecute=false)`);
+        }
+
+        const adoptedTrade = await prisma.trade.create({
+          data: {
+            pair: symbol,
+            type: 'buy',
+            entryPrice,
+            volume,
+            stopLoss,
+            takeProfit,
+            status: 'open',
+            txid: `adopted-${symbol}-${Date.now()}`,
+            closeReason: 'adopted_from_ib',
+            slOrderId: slOrderId ?? null,
+            tpOrderId: tpOrderId ?? null,
+            expectedProfitUSD,
+            expectedLossUSD,
+            riskRewardRatio,
+          },
+        });
+
+        const posId = adoptedTrade.txid ?? `${symbol}-${adoptedTrade.id}`;
+        this.activePositions.set(posId, {
+          txid: posId,
+          pair: symbol,
+          type: 'buy',
+          entryPrice,
+          volume,
+          stopLoss,
+          takeProfit,
+          currentPrice: entryPrice,
+          pnl: 0,
+          pnlPercent: 0,
+          timestamp: adoptedTrade.createdAt.getTime(),
+          dbTradeId: adoptedTrade.id,
+          parentOrderId: undefined,
+          slOrderId: slOrderId,
+          tpOrderId: tpOrderId,
+          expectedProfitUSD,
+          expectedLossUSD,
+          riskRewardRatio: riskRewardRatio ?? undefined,
+          partialTaken: false,
+        });
+
+        adopted++;
+        logActivity.warning(
+          `🧩 Adopted untracked IB position: ${symbol} | ${volume} shares @ $${entryPrice.toFixed(2)} | ` +
+          `SL: $${stopLoss.toFixed(2)} | TP: $${takeProfit.toFixed(2)}`
+        );
+      }
+
+      if (recovered > 0 || markedClosed > 0 || adopted > 0) {
+        logActivity.info(
+          `🔄 Recovery complete: ${recovered} restored, ${markedClosed} marked closed (offline), ${adopted} adopted from IB`
+        );
         if (recovered > 0) {
           logActivity.info('ℹ️  Native IB bracket orders are still active — SL/TP protection is intact');
         }

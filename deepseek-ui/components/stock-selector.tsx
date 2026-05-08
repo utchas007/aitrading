@@ -84,6 +84,7 @@ const SECTOR_COLORS: Record<string, { bg: string; border: string; text: string }
 };
 
 const TIER_LABELS = { large: "Large Cap", mid: "Mid Cap", small: "Small Cap" };
+const MAX_STOCK_PAIRS = 50;
 
 // Risk/engine parameters that should be preserved across stock selection changes
 interface BotConfig {
@@ -178,22 +179,46 @@ export default function StockSelector() {
   };
 
   const toggle = (symbol: string) => {
-    setSelectedSymbols(prev =>
-      prev.includes(symbol) ? prev.filter(s => s !== symbol) : [...prev, symbol]
-    );
+    setSelectedSymbols(prev => {
+      if (prev.includes(symbol)) return prev.filter(s => s !== symbol);
+      if (prev.length >= MAX_STOCK_PAIRS) {
+        setValidationError(`You can select at most ${MAX_STOCK_PAIRS} stocks.`);
+        return prev;
+      }
+      setValidationError(null);
+      return [...prev, symbol];
+    });
   };
 
   const selectByTier = (tier: "large" | "mid" | "small") => {
-    setSelectedSymbols(AVAILABLE_STOCKS.filter(s => s.tier === tier).map(s => s.symbol));
+    const symbols = AVAILABLE_STOCKS.filter(s => s.tier === tier).map(s => s.symbol);
+    const capped = symbols.slice(0, MAX_STOCK_PAIRS);
+    setSelectedSymbols(capped);
+    if (symbols.length > MAX_STOCK_PAIRS) {
+      setValidationError(`Tier has ${symbols.length} stocks. Only first ${MAX_STOCK_PAIRS} selected.`);
+    } else {
+      setValidationError(null);
+    }
   };
 
   const selectBySector = (sector: string) => {
-    setSelectedSymbols(AVAILABLE_STOCKS.filter(s => s.sector === sector).map(s => s.symbol));
+    const symbols = AVAILABLE_STOCKS.filter(s => s.sector === sector).map(s => s.symbol);
+    const capped = symbols.slice(0, MAX_STOCK_PAIRS);
+    setSelectedSymbols(capped);
+    if (symbols.length > MAX_STOCK_PAIRS) {
+      setValidationError(`Sector has ${symbols.length} stocks. Only first ${MAX_STOCK_PAIRS} selected.`);
+    } else {
+      setValidationError(null);
+    }
   };
 
   const applyChanges = async () => {
     if (selectedSymbols.length === 0) {
       setValidationError("Please select at least one stock.");
+      return;
+    }
+    if (selectedSymbols.length > MAX_STOCK_PAIRS) {
+      setValidationError(`You selected ${selectedSymbols.length} stocks. Maximum allowed is ${MAX_STOCK_PAIRS}.`);
       return;
     }
     setValidationError(null);
@@ -230,7 +255,10 @@ export default function StockSelector() {
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus("idle"), 2000);
       } else {
-        throw new Error(data.error || "Failed to apply changes");
+        const issueText = Array.isArray(data.issues) && data.issues.length > 0
+          ? data.issues.map((i: { field?: string; message?: string }) => `${i.field ?? "config"}: ${i.message ?? "invalid"}`).join(" | ")
+          : null;
+        throw new Error(issueText || data.error || "Failed to apply changes");
       }
     } catch (error: unknown) {
       console.error("Failed to apply changes:", error);
@@ -284,7 +312,10 @@ export default function StockSelector() {
 
       {/* Quick Filters */}
       <div style={{ display: "flex", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
-        <button onClick={() => setSelectedSymbols(AVAILABLE_STOCKS.map(s => s.symbol))}
+        <button onClick={() => {
+          setSelectedSymbols(AVAILABLE_STOCKS.map(s => s.symbol).slice(0, MAX_STOCK_PAIRS));
+          setValidationError(`Selected first ${MAX_STOCK_PAIRS} stocks (max allowed).`);
+        }}
           style={filterBtn()}>✓ Select All</button>
         <button onClick={() => setSelectedSymbols([])}
           style={filterBtn()}>✗ Clear</button>
@@ -334,7 +365,9 @@ export default function StockSelector() {
       }}>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 10, color: "#555", marginBottom: 4 }}>SELECTED</div>
-          <div style={{ fontSize: 20, color: "#00ff9f", fontWeight: 600 }}>{selectedSymbols.length}</div>
+          <div style={{ fontSize: 20, color: "#00ff9f", fontWeight: 600 }}>
+            {selectedSymbols.length}/{MAX_STOCK_PAIRS}
+          </div>
         </div>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 10, color: "#555", marginBottom: 4 }}>CURRENTLY ACTIVE</div>

@@ -91,7 +91,7 @@ export const engineControlSchema = z.object({
             .transform((s) => s.toUpperCase()),
         )
         .min(1, 'At least one trading pair required')
-        .max(20, 'Too many pairs (max 20)')
+        .max(50, 'Too many pairs (max 50)')
         .optional(),
       minConfidence: z
         .number()
