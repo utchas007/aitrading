@@ -179,6 +179,28 @@ export class TradingEngine {
   private lastHeartbeatAt: number = 0;   // Timestamp of last successful cycle
   private heartbeatIntervalId?: NodeJS.Timeout; // Heartbeat monitor timer
 
+  private computeExpectedPnL(signal: TradeSignal): { expectedProfitUSD: number; expectedLossUSD: number; riskRewardRatio?: number } {
+    const expectedProfitUSD = parseFloat(
+      (signal.action === 'buy'
+        ? signal.positionSize * (signal.takeProfit - signal.entryPrice)
+        : signal.positionSize * (signal.entryPrice - signal.takeProfit)
+      ).toFixed(2)
+    );
+    const expectedLossUSD = parseFloat(
+      (signal.action === 'buy'
+        ? signal.positionSize * (signal.entryPrice - signal.stopLoss)
+        : signal.positionSize * (signal.stopLoss - signal.entryPrice)
+      ).toFixed(2)
+    );
+    return {
+      expectedProfitUSD,
+      expectedLossUSD,
+      riskRewardRatio: expectedLossUSD > 0
+        ? parseFloat((expectedProfitUSD / expectedLossUSD).toFixed(2))
+        : undefined,
+    };
+  }
+
   constructor(config: Partial<TradingEngineConfig> = {}) {
     this.config = {
       pairs: config.pairs || [
@@ -1023,7 +1045,7 @@ export class TradingEngine {
       // Fetch IB positions once — used for both BUY and SELL guards below
       const ibPositions = await ib.getPositions();
 
-      // For BUY: skip if IB already holds shares OR if bot already tracks an active position
+      // For BUY: skip if IB already holds a long position OR if bot already tracks an active position
       if (signal.action === 'buy') {
         const existing = ibPositions.find(p => p.symbol === signal.pair && p.position > 0);
         if (existing) {
@@ -1037,16 +1059,18 @@ export class TradingEngine {
         }
       }
 
-      // For SELL: verify we actually hold shares via IB positions
+      // For SELL: if a long position exists, this SELL acts as a close/reduce.
+      // If no long exists, allow opening a short position.
       if (signal.action === 'sell') {
         const pos = ibPositions.find(p => p.symbol === signal.pair && p.position > 0);
-        if (!pos) {
-          logActivity.warning(`Cannot sell ${signal.pair}: No IB position found`);
-          return;
+        if (pos) {
+          // Sell only what we own when reducing/closing a long
+          signal.positionSize = Math.min(signal.positionSize, pos.position);
+          logActivity.info(`✅ IB long position found: ${pos.position} shares of ${signal.pair} (SELL will reduce/close long)`);
+        } else {
+          // No long exists: this is a short entry
+          logActivity.info(`✅ No existing long for ${signal.pair} — SELL will open a short position`);
         }
-        // Sell only what we own
-        signal.positionSize = Math.min(signal.positionSize, pos.position);
-        logActivity.info(`✅ IB position found: ${pos.position} shares of ${signal.pair}`);
       }
 
       let posId: string;
@@ -1113,20 +1137,12 @@ export class TradingEngine {
       if (this.config.autoExecute) {
         try {
           const { prisma } = await import('./db');
-          const expectedProfitUSD = parseFloat(
-            (signal.positionSize * (signal.takeProfit - signal.entryPrice)).toFixed(2)
-          );
-          const expectedLossUSD = parseFloat(
-            (signal.positionSize * (signal.entryPrice - signal.stopLoss)).toFixed(2)
-          );
-          const riskRewardRatio = expectedLossUSD > 0
-            ? parseFloat((expectedProfitUSD / expectedLossUSD).toFixed(2))
-            : null;
+          const expected = this.computeExpectedPnL(signal);
 
           logActivity.info(
-            `🎯 Expected profit if TP hits: $${expectedProfitUSD.toFixed(2)} | ` +
-            `Expected loss if SL hits: -$${expectedLossUSD.toFixed(2)} | ` +
-            `R:R ratio: ${riskRewardRatio ?? 'N/A'}`
+            `🎯 Expected profit if TP hits: $${expected.expectedProfitUSD.toFixed(2)} | ` +
+            `Expected loss if SL hits: -$${expected.expectedLossUSD.toFixed(2)} | ` +
+            `R:R ratio: ${expected.riskRewardRatio ?? 'N/A'}`
           );
 
           const dbTrade = await prisma.trade.create({
@@ -1141,9 +1157,9 @@ export class TradingEngine {
               txid:              posId,
               slOrderId:         slOrderId  ?? null,
               tpOrderId:         tpOrderId  ?? null,
-              expectedProfitUSD,
-              expectedLossUSD,
-              riskRewardRatio,
+              expectedProfitUSD: expected.expectedProfitUSD,
+              expectedLossUSD:   expected.expectedLossUSD,
+              riskRewardRatio:   expected.riskRewardRatio ?? null,
             },
           });
           dbTradeId = dbTrade.id;
@@ -1152,12 +1168,7 @@ export class TradingEngine {
         }
       }
 
-      const expectedProfitUSD_ = parseFloat(
-        (signal.positionSize * (signal.takeProfit - signal.entryPrice)).toFixed(2)
-      );
-      const expectedLossUSD_ = parseFloat(
-        (signal.positionSize * (signal.entryPrice - signal.stopLoss)).toFixed(2)
-      );
+      const expected = this.computeExpectedPnL(signal);
 
       this.activePositions.set(posId, {
         txid:              posId,
@@ -1175,11 +1186,9 @@ export class TradingEngine {
         parentOrderId,
         slOrderId,
         tpOrderId,
-        expectedProfitUSD: expectedProfitUSD_,
-        expectedLossUSD:   expectedLossUSD_,
-        riskRewardRatio:   expectedLossUSD_ > 0
-          ? parseFloat((expectedProfitUSD_ / expectedLossUSD_).toFixed(2))
-          : undefined,
+        expectedProfitUSD: expected.expectedProfitUSD,
+        expectedLossUSD:   expected.expectedLossUSD,
+        riskRewardRatio:   expected.riskRewardRatio,
       });
     } catch (error: any) {
       log.error('Failed to execute order', { pair: signal.pair, action: signal.action, error: error.message });
@@ -1346,6 +1355,7 @@ export class TradingEngine {
         try {
           ibPositions = await ib.getPositions();
           ibPositionsSucceeded = true; // call succeeded — empty array is a valid "no positions" state
+          this.logPositionParity(ibPositions);
         } catch {
           // Non-fatal; P&L update continues without close detection this cycle
         }
@@ -1408,7 +1418,13 @@ export class TradingEngine {
           const positionAgeMs  = Date.now() - position.timestamp;
           const positionMature = positionAgeMs >= 120_000;
 
-          const ibPos = ibPositions.find(p => p.symbol === position.pair && p.position > 0);
+          const ibPos = ibPositions.find(p =>
+            p.symbol === position.pair &&
+            (
+              (position.type === 'buy'  && p.position > 0) ||
+              (position.type === 'sell' && p.position < 0)
+            )
+          );
           if (!ibPos && ibDataTrusted && positionMature) {
             // IB no longer holds shares → bracket SL or TP fired
             // Total P&L = remaining-half P&L + any locked partial P&L.
@@ -1428,7 +1444,9 @@ export class TradingEngine {
                     position.currentPrice = lastClose;
                     position.pnl = recomputed;
                     position.pnlPercent = position.entryPrice > 0
-                      ? ((lastClose - position.entryPrice) / position.entryPrice) * 100
+                      ? (position.type === 'buy'
+                        ? ((lastClose - position.entryPrice) / position.entryPrice) * 100
+                        : ((position.entryPrice - lastClose) / position.entryPrice) * 100)
                       : position.pnlPercent;
                   }
                 }
@@ -1703,13 +1721,7 @@ export class TradingEngine {
                   if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
                   if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
                   await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
-                  await ib.placeOrder({
-                    symbol:        position.pair,
-                    action:        position.type === 'buy' ? 'SELL' : 'BUY',
-                    quantity:      position.volume,
-                    order_type:    'MKT',
-                    validate_only: false,
-                  });
+                  await this.forceLiquidatePosition(ib, position, 'ai_exit');
                   this.dailyRealizedPnl += position.pnl;
                   if (position.dbTradeId) {
                     import('./db').then(({ prisma }) =>
@@ -1786,13 +1798,7 @@ export class TradingEngine {
                 if (position.slOrderId) await ib.cancelOrder(position.slOrderId).catch(() => {});
                 if (position.tpOrderId) await ib.cancelOrder(position.tpOrderId).catch(() => {});
                 await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
-                await ib.placeOrder({
-                  symbol:        position.pair,
-                  action:        position.type === 'buy' ? 'SELL' : 'BUY',
-                  quantity:      position.volume,
-                  order_type:    'MKT',
-                  validate_only: false,
-                });
+                await this.forceLiquidatePosition(ib, position, 'time_exit');
                 this.dailyRealizedPnl += position.pnl;
                 if (position.dbTradeId) {
                   import('./db').then(({ prisma }) =>
@@ -1851,6 +1857,86 @@ export class TradingEngine {
     }
   }
 
+  private logPositionParity(ibPositions: Awaited<ReturnType<ReturnType<typeof createIBClient>['getPositions']>>): void {
+    const ibBySymbol = new Map<string, number>();
+    for (const p of ibPositions) {
+      if (p.sec_type !== 'STK' || !Number.isFinite(p.position) || p.position === 0) continue;
+      ibBySymbol.set(p.symbol, Math.floor(p.position));
+    }
+
+    const botBySymbol = new Map<string, number>();
+    for (const position of this.activePositions.values()) {
+      const signed = position.type === 'buy' ? Math.floor(position.volume) : -Math.floor(position.volume);
+      botBySymbol.set(position.pair, (botBySymbol.get(position.pair) ?? 0) + signed);
+    }
+
+    const allSymbols = new Set<string>([...ibBySymbol.keys(), ...botBySymbol.keys()]);
+    for (const symbol of allSymbols) {
+      const ibQty = ibBySymbol.get(symbol) ?? 0;
+      const botQty = botBySymbol.get(symbol) ?? 0;
+      if (ibQty !== botQty) {
+        log.warn('IB/Bot position parity mismatch', { symbol, ibQty, botQty });
+        logActivity.warning(`⚠️ Position parity mismatch — ${symbol}: IB=${ibQty}, bot=${botQty}`);
+      }
+    }
+  }
+
+  /**
+   * Hard liquidation guard:
+   * submit market close order, then verify IB position and retry if a partial
+   * fill leaves leftover shares. This prevents orphaned positions.
+   */
+  private async forceLiquidatePosition(
+    ib: ReturnType<typeof createIBClient>,
+    position: ActivePosition,
+    reason: 'ai_exit' | 'time_exit',
+  ): Promise<void> {
+    const action = position.type === 'buy' ? 'SELL' : 'BUY';
+    let remainingShares = Math.max(0, Math.floor(position.volume));
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts && remainingShares > 0; attempt++) {
+      await ib.placeOrder({
+        symbol:        position.pair,
+        action,
+        quantity:      remainingShares,
+        order_type:    'MKT',
+        validate_only: false,
+      });
+
+      // Give IB a moment to reflect fill quantity in positions endpoint.
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      const livePositions = await ib.getPositions();
+      const livePos = livePositions.find(p =>
+        p.symbol === position.pair &&
+        (
+          (position.type === 'buy'  && p.position > 0) ||
+          (position.type === 'sell' && p.position < 0)
+        )
+      );
+      const updatedRemaining = livePos ? Math.floor(Math.abs(livePos.position)) : 0;
+
+      const soldThisAttempt = remainingShares - updatedRemaining;
+      logActivity.info(
+        `🧾 Exit fill check — ${position.pair} | ${reason} | attempt ${attempt}/${maxAttempts} | ` +
+        `sold ${Math.max(0, soldThisAttempt)} share(s), remaining ${updatedRemaining}`
+      );
+
+      remainingShares = updatedRemaining;
+      if (remainingShares > 0) {
+        // Safety net: cancel any symbol-level leftovers before re-submitting.
+        await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
+      }
+    }
+
+    if (remainingShares > 0) {
+      logActivity.error(
+        `❌ Forced liquidation incomplete — ${position.pair} still has ${remainingShares} share(s) after ${maxAttempts} attempts. Manual review required.`
+      );
+      throw new Error(`Forced liquidation incomplete: ${position.pair} leftover shares=${remainingShares}`);
+    }
+  }
+
   /**
    * Recover open positions from the database on startup.
    *
@@ -1892,14 +1978,21 @@ export class TradingEngine {
       let adopted = 0;
 
       for (const trade of openTrades) {
-        const ibPos = ibPositions.find(p => p.symbol === trade.pair && p.position > 0);
+        const ibPos = ibPositions.find(p =>
+          p.symbol === trade.pair &&
+          (
+            (trade.type === 'buy'  && p.position > 0) ||
+            (trade.type === 'sell' && p.position < 0)
+          )
+        );
 
         if (!ibPos) {
-          // Before marking closed, check if there's still an unfilled entry BUY order —
+          // Before marking closed, check if there's still an unfilled entry order —
           // if so, the position hasn't opened yet (limit not yet filled) — don't close it.
+          const expectedEntryAction = trade.type === 'sell' ? 'SELL' : 'BUY';
           const pendingEntry = ibOrders.some(
             o => o.symbol === trade.pair &&
-                 o.action === 'BUY' &&
+                 o.action === expectedEntryAction &&
                  (o.status === 'Submitted' || o.status === 'PreSubmitted')
           );
           if (pendingEntry) {
@@ -1924,7 +2017,7 @@ export class TradingEngine {
             pair:              trade.pair,
             type:              trade.type as 'buy' | 'sell',
             entryPrice:        trade.entryPrice,
-            volume:            ibPos.position,
+            volume:            Math.abs(ibPos.position),
             stopLoss:          trade.stopLoss,
             takeProfit:        trade.takeProfit,
             currentPrice:      trade.entryPrice,
@@ -1971,9 +2064,8 @@ export class TradingEngine {
         const symbol = ibPos.symbol.toUpperCase();
         if (trackedPairs.has(symbol)) continue;
 
-        // For now adopt only long stock positions; short/other assets need separate handling.
-        if (ibPos.position <= 0) continue;
         if (ibPos.sec_type !== 'STK') continue;
+        if (ibPos.position === 0) continue;
 
         const entryPrice = ibPos.avg_cost;
         if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
@@ -1981,11 +2073,33 @@ export class TradingEngine {
           continue;
         }
 
-        const volume = ibPos.position;
-        const stopLoss = parseFloat((entryPrice * (1 - this.config.stopLossPercent)).toFixed(2));
-        const takeProfit = parseFloat((entryPrice * (1 + this.config.takeProfitPercent)).toFixed(2));
-        const expectedProfitUSD = parseFloat((volume * (takeProfit - entryPrice)).toFixed(2));
-        const expectedLossUSD = parseFloat((volume * (entryPrice - stopLoss)).toFixed(2));
+        const isShort = ibPos.position < 0;
+        const volume = Math.abs(ibPos.position);
+        const adoptedType: 'buy' | 'sell' = isShort ? 'sell' : 'buy';
+        const stopLoss = parseFloat(
+          (isShort
+            ? entryPrice * (1 + this.config.stopLossPercent)
+            : entryPrice * (1 - this.config.stopLossPercent)
+          ).toFixed(2)
+        );
+        const takeProfit = parseFloat(
+          (isShort
+            ? entryPrice * (1 - this.config.takeProfitPercent)
+            : entryPrice * (1 + this.config.takeProfitPercent)
+          ).toFixed(2)
+        );
+        const expectedProfitUSD = parseFloat(
+          (isShort
+            ? volume * (entryPrice - takeProfit)
+            : volume * (takeProfit - entryPrice)
+          ).toFixed(2)
+        );
+        const expectedLossUSD = parseFloat(
+          (isShort
+            ? volume * (stopLoss - entryPrice)
+            : volume * (entryPrice - stopLoss)
+          ).toFixed(2)
+        );
         const riskRewardRatio = expectedLossUSD > 0
           ? parseFloat((expectedProfitUSD / expectedLossUSD).toFixed(4))
           : null;
@@ -1996,20 +2110,20 @@ export class TradingEngine {
         // Place native IB protection immediately for adopted positions so they
         // are protected even if the bot restarts again.
         // Only do this in live execution mode.
-        const hasExistingSellOrders = ibOrders.some(
+        const hasExistingExitOrders = ibOrders.some(
           o => o.symbol === symbol &&
-               o.action === 'SELL' &&
+               o.action === (isShort ? 'BUY' : 'SELL') &&
                (o.status === 'Submitted' || o.status === 'PreSubmitted')
         );
 
         if (this.config.autoExecute) {
-          if (hasExistingSellOrders) {
-            logActivity.info(`🛡️ ${symbol}: existing IB SELL orders detected — keeping current native protection`);
+          if (hasExistingExitOrders) {
+            logActivity.info(`🛡️ ${symbol}: existing IB ${isShort ? 'BUY' : 'SELL'} exit orders detected — keeping current native protection`);
           } else {
             try {
               const oca = await ib.placeOcaOrder({
                 symbol,
-                action: 'SELL',
+                action: isShort ? 'BUY' : 'SELL',
                 quantity: volume,
                 stop_price: stopLoss,
                 limit_price: takeProfit,
@@ -2031,7 +2145,7 @@ export class TradingEngine {
         const adoptedTrade = await prisma.trade.create({
           data: {
             pair: symbol,
-            type: 'buy',
+            type: adoptedType,
             entryPrice,
             volume,
             stopLoss,
@@ -2051,7 +2165,7 @@ export class TradingEngine {
         this.activePositions.set(posId, {
           txid: posId,
           pair: symbol,
-          type: 'buy',
+          type: adoptedType,
           entryPrice,
           volume,
           stopLoss,
@@ -2072,7 +2186,7 @@ export class TradingEngine {
 
         adopted++;
         logActivity.warning(
-          `🧩 Adopted untracked IB position: ${symbol} | ${volume} shares @ $${entryPrice.toFixed(2)} | ` +
+          `🧩 Adopted untracked IB ${isShort ? 'SHORT' : 'LONG'}: ${symbol} | ${volume} shares @ $${entryPrice.toFixed(2)} | ` +
           `SL: $${stopLoss.toFixed(2)} | TP: $${takeProfit.toFixed(2)}`
         );
       }
