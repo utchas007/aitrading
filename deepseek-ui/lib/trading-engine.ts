@@ -157,6 +157,15 @@ export interface TradingEngineConfig {
   maxPositionsPerSector: number; // Max concurrent open positions in same sector
 }
 
+interface LearningStats {
+  wins: number;
+  losses: number;
+  trades: number;
+  totalPnl: number;
+  totalPnlPercent: number;
+  lastUpdated: number;
+}
+
 export class TradingEngine {
   private config: TradingEngineConfig;
   private riskManager: RiskManager;
@@ -178,6 +187,8 @@ export class TradingEngine {
   private preOpenPrepDone: string = ''; // Date string of last pre-open prep (once per day)
   private lastHeartbeatAt: number = 0;   // Timestamp of last successful cycle
   private heartbeatIntervalId?: NodeJS.Timeout; // Heartbeat monitor timer
+  private learningByKey: Map<string, LearningStats> = new Map();
+  private learningLoaded: boolean = false;
 
   private computeExpectedPnL(signal: TradeSignal): { expectedProfitUSD: number; expectedLossUSD: number; riskRewardRatio?: number } {
     const expectedProfitUSD = parseFloat(
@@ -274,6 +285,7 @@ export class TradingEngine {
     // Recover any open positions from DB before starting the loops
     // (handles restarts where activePositions Map was lost)
     await this.recoverPositions();
+    await this.loadLearningState();
 
     // Heartbeat monitor: warn if the engine hasn't completed a cycle in 2× the check interval
     this.heartbeatIntervalId = setInterval(() => {
@@ -393,11 +405,13 @@ export class TradingEngine {
     }
 
     const session = getMarketSession();
+    const allowExtendedHours = process.env.ALLOW_EXTENDED_HOURS_TRADING === '1';
+    const canOpenNewTrades = session.isOpen || (allowExtendedHours && session.isExtendedHours);
 
-    // Only trade during regular market hours (9:30–16:00 ET Mon–Fri)
-    // Extended hours and overnight sessions are skipped for new signals.
+    // Default behavior: only trade during regular hours.
+    // Optional override: ALLOW_EXTENDED_HOURS_TRADING=1 enables pre/after/overnight.
     // Position monitoring continues on its own 30-second timer regardless.
-    if (!session.isOpen) {
+    if (!canOpenNewTrades) {
       const mins = Math.round(session.nextOpenMs / 60000);
       const wait = mins > 60 ? `${Math.round(mins / 60)}h` : `${mins}m`;
       const todayStr = new Date().toDateString();
@@ -406,7 +420,11 @@ export class TradingEngine {
         await this.gatherOffHoursData();
         this.preOpenPrepDone = todayStr;
       } else {
-        log.debug('Market closed/extended hours — skipping new signals', { session: session.session, nextOpenIn: wait });
+        log.debug('Market closed/extended hours — skipping new signals', {
+          session: session.session,
+          nextOpenIn: wait,
+          allowExtendedHours,
+        });
       }
       return;
     }
@@ -865,6 +883,20 @@ export class TradingEngine {
       }
     }
 
+    // Adaptive learning layer: adjust confidence from recent realized outcomes.
+    // Guardrailed to small deltas so risk rules remain the primary control.
+    if (action !== 'hold') {
+      const learned = this.getLearningAdjustment(pair, action);
+      const before = confidence;
+      confidence = Math.max(0, Math.min(100, Math.round(confidence + learned.confidenceDelta)));
+      if (learned.confidenceDelta !== 0) {
+        logActivity.info(
+          `🧠 Learning adjust — ${pair} ${action.toUpperCase()} | confidence ${before}% → ${confidence}% ` +
+          `(${learned.confidenceDelta > 0 ? '+' : ''}${learned.confidenceDelta}) from ${learned.trades} prior trades`
+        );
+      }
+    }
+
     // ── Micro filter 3: VIX + MACD stability ─────────────────────────────────
     // At elevated VIX (>22), require MACD histogram > 0 to confirm trend has
     // actual momentum behind it — not just a noise spike.
@@ -911,6 +943,20 @@ export class TradingEngine {
     }
 
     let positionSize = sizing.finalShares;
+    if (action !== 'hold') {
+      const learned = this.getLearningAdjustment(pair, action);
+      const learnedShares = Math.floor(positionSize * learned.sizeMultiplier);
+      if (learnedShares > 0) {
+        const before = positionSize;
+        positionSize = learnedShares;
+        if (before !== positionSize) {
+          logActivity.info(
+            `🧠 Learning size — ${pair} ${action.toUpperCase()} | ${before} → ${positionSize} shares ` +
+            `(mult ${learned.sizeMultiplier.toFixed(2)})`
+          );
+        }
+      }
+    }
     if (positionSize < 1) {
       logActivity.warning(`${pair}: Position size < 1 share. Skipping.`);
       action = 'hold';
@@ -1030,10 +1076,15 @@ export class TradingEngine {
 
       if (signal.action === 'hold') return;
 
-      // Hard gate: never place orders outside regular market hours or when IB is disconnected
+      // Hard gate: regular-hours only by default; optional extended-hours via env toggle.
       const execSession = getMarketSession();
-      if (!execSession.isOpen) {
-        logActivity.warning(`⛔ Order blocked — market not in regular hours (${execSession.session}). No orders placed outside 9:30–16:00 ET.`);
+      const allowExtendedHours = process.env.ALLOW_EXTENDED_HOURS_TRADING === '1';
+      const canTradeNow = execSession.isOpen || (allowExtendedHours && execSession.isExtendedHours);
+      if (!canTradeNow) {
+        logActivity.warning(
+          `⛔ Order blocked — market session is ${execSession.session}. ` +
+          `Set ALLOW_EXTENDED_HOURS_TRADING=1 to allow pre/after/overnight execution.`
+        );
         return;
       }
       const ibHealth = await ib.getHealth();
@@ -1087,6 +1138,7 @@ export class TradingEngine {
         const entryLimit = signal.action === 'buy'
           ? parseFloat((signal.entryPrice * (1 + limitSlippage)).toFixed(2))
           : parseFloat((signal.entryPrice * (1 - limitSlippage)).toFixed(2));
+        const useExtendedRouting = !execSession.isOpen;
 
         const bracket = await ib.placeBracketOrder({
           symbol:           signal.pair,
@@ -1095,8 +1147,8 @@ export class TradingEngine {
           stop_loss_price:  signal.stopLoss,
           take_profit_price: signal.takeProfit,
           limit_price:      entryLimit,
-          outside_rth:      false,  // regular hours only
-          overnight:        false,
+          outside_rth:      useExtendedRouting,
+          overnight:        useExtendedRouting && execSession.isOvernight,
           validate_only:    false,
         });
 
@@ -1481,6 +1533,7 @@ export class TradingEngine {
             );
 
             this.dailyRealizedPnl += totalPnl;
+            this.recordTradeOutcome(position, totalPnl);
 
             if (position.dbTradeId) {
               import('./db').then(({ prisma }) =>
@@ -1723,6 +1776,7 @@ export class TradingEngine {
                   await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
                   await this.forceLiquidatePosition(ib, position, 'ai_exit');
                   this.dailyRealizedPnl += position.pnl;
+                  this.recordTradeOutcome(position, position.pnl);
                   if (position.dbTradeId) {
                     import('./db').then(({ prisma }) =>
                       prisma.trade.update({
@@ -1800,6 +1854,7 @@ export class TradingEngine {
                 await ib.cancelOrdersForSymbol(position.pair).catch(() => {});
                 await this.forceLiquidatePosition(ib, position, 'time_exit');
                 this.dailyRealizedPnl += position.pnl;
+                this.recordTradeOutcome(position, position.pnl);
                 if (position.dbTradeId) {
                   import('./db').then(({ prisma }) =>
                     prisma.trade.update({
@@ -1845,6 +1900,7 @@ export class TradingEngine {
 
           if (shouldClose.shouldClose) {
             this.dailyRealizedPnl += position.pnl;
+            this.recordTradeOutcome(position, position.pnl);
             log.info('Paper position closed', { pair: position.pair, reason: shouldClose.reason, entry: position.entryPrice.toFixed(2), current: position.currentPrice.toFixed(2), pnl: position.pnl.toFixed(2) });
             logActivity.completed(`✅ Paper position closed — ${position.pair} | P&L: $${position.pnl.toFixed(2)} (${position.pnlPercent.toFixed(2)}%) | Reason: ${shouldClose.reason}`);
             this.activePositions.delete(txid);
@@ -1854,6 +1910,91 @@ export class TradingEngine {
       }
     } catch (error) {
       log.error('Error updating positions', { error: String(error) });
+    }
+  }
+
+  private learningKey(pair: string, action: 'buy' | 'sell'): string {
+    return `${pair.toUpperCase()}:${action}`;
+  }
+
+  private getLearningAdjustment(pair: string, action: 'buy' | 'sell'): { confidenceDelta: number; sizeMultiplier: number; trades: number } {
+    const stats = this.learningByKey.get(this.learningKey(pair, action));
+    if (!stats || stats.trades < 5) return { confidenceDelta: 0, sizeMultiplier: 1, trades: stats?.trades ?? 0 };
+
+    const winRate = stats.wins / stats.trades;
+    const avgPnlPct = stats.totalPnlPercent / stats.trades;
+
+    let confidenceDelta = 0;
+    if (winRate >= 0.62 && avgPnlPct > 0) confidenceDelta = 6;
+    else if (winRate >= 0.55 && avgPnlPct >= 0) confidenceDelta = 3;
+    else if (winRate <= 0.38 && avgPnlPct < 0) confidenceDelta = -6;
+    else if (winRate <= 0.45 && avgPnlPct <= 0) confidenceDelta = -3;
+
+    let sizeMultiplier = 1;
+    if (winRate >= 0.62 && avgPnlPct > 0) sizeMultiplier = 1.15;
+    else if (winRate >= 0.55 && avgPnlPct >= 0) sizeMultiplier = 1.08;
+    else if (winRate <= 0.38 && avgPnlPct < 0) sizeMultiplier = 0.82;
+    else if (winRate <= 0.45 && avgPnlPct <= 0) sizeMultiplier = 0.90;
+
+    return { confidenceDelta, sizeMultiplier, trades: stats.trades };
+  }
+
+  private recordTradeOutcome(position: ActivePosition, pnlUsd: number): void {
+    const action = position.type as 'buy' | 'sell';
+    const key = this.learningKey(position.pair, action);
+    const current = this.learningByKey.get(key) ?? {
+      wins: 0, losses: 0, trades: 0, totalPnl: 0, totalPnlPercent: 0, lastUpdated: Date.now(),
+    };
+
+    current.trades += 1;
+    if (pnlUsd >= 0) current.wins += 1;
+    else current.losses += 1;
+    current.totalPnl += pnlUsd;
+    current.totalPnlPercent += position.pnlPercent;
+    current.lastUpdated = Date.now();
+
+    this.learningByKey.set(key, current);
+    void this.persistLearningState();
+  }
+
+  private async loadLearningState(): Promise<void> {
+    if (this.learningLoaded) return;
+    this.learningLoaded = true;
+    try {
+      const { prisma } = await import('./db');
+      const cache = await prisma.botCache.findUnique({ where: { key: 'signal_learning_v1' } });
+      const raw = cache?.value as Record<string, LearningStats> | undefined;
+      if (!raw || typeof raw !== 'object') return;
+      for (const [k, v] of Object.entries(raw)) {
+        if (!v || typeof v !== 'object') continue;
+        this.learningByKey.set(k, {
+          wins: Number(v.wins ?? 0),
+          losses: Number(v.losses ?? 0),
+          trades: Number(v.trades ?? 0),
+          totalPnl: Number(v.totalPnl ?? 0),
+          totalPnlPercent: Number(v.totalPnlPercent ?? 0),
+          lastUpdated: Number(v.lastUpdated ?? Date.now()),
+        });
+      }
+      if (this.learningByKey.size > 0) {
+        logActivity.info(`🧠 Loaded learning memory: ${this.learningByKey.size} signal profile(s)`);
+      }
+    } catch (e) {
+      log.warn('Failed to load learning state', { error: String(e) });
+    }
+  }
+
+  private async persistLearningState(): Promise<void> {
+    try {
+      const payload = Object.fromEntries(this.learningByKey.entries()) as any;
+      const { prisma } = await import('./db');
+      await prisma.botCache.upsert({
+        where: { key: 'signal_learning_v1' },
+        update: { value: payload },
+        create: { key: 'signal_learning_v1', value: payload },
+      });
+    } catch (e) {
+      log.warn('Failed to persist learning state', { error: String(e) });
     }
   }
 
@@ -2054,10 +2195,11 @@ export class TradingEngine {
         }
       }
 
-      // Adopt any leftover live IB positions that are not represented in DB open trades.
-      // This handles manual fills / orphaned positions after restarts so the bot can manage exits.
+      // Adopt any leftover live IB positions that are not represented in successfully-recovered bot trades.
+      // Use activePositions (not openTrades) so symbols marked closed_while_offline above are eligible
+      // for adoption if IB holds a position in the opposite direction.
       const trackedPairs = new Set(
-        openTrades.map(t => t.pair.toUpperCase())
+        [...this.activePositions.values()].map(p => p.pair.toUpperCase())
       );
 
       for (const ibPos of ibPositions) {
