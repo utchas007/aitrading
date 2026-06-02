@@ -1395,23 +1395,24 @@ export class TradingEngine {
    * since no real IB orders exist to monitor.
    */
   private async updatePositions(): Promise<void> {
-    if (this.activePositions.size === 0) return;
-
     try {
       const ib = createIBClient();
 
-      // Fetch IB positions once for all symbols (used to detect native bracket closes)
+      // Fetch IB positions once for all symbols (used to detect native bracket closes + live adoption)
       let ibPositions: Awaited<ReturnType<typeof ib.getPositions>> = [];
       let ibPositionsSucceeded = false;
       if (this.config.autoExecute) {
         try {
           ibPositions = await ib.getPositions();
           ibPositionsSucceeded = true; // call succeeded — empty array is a valid "no positions" state
-          this.logPositionParity(ibPositions);
+          await this.reconcilePositions(ibPositions, ib);
         } catch {
           // Non-fatal; P&L update continues without close detection this cycle
         }
       }
+
+      // Skip per-position P&L loop if nothing to track
+      if (this.activePositions.size === 0) return;
 
       for (const [txid, position] of this.activePositions) {
         // Update current price and P&L
@@ -1998,27 +1999,108 @@ export class TradingEngine {
     }
   }
 
-  private logPositionParity(ibPositions: Awaited<ReturnType<ReturnType<typeof createIBClient>['getPositions']>>): void {
+  private async reconcilePositions(
+    ibPositions: Awaited<ReturnType<ReturnType<typeof createIBClient>['getPositions']>>,
+    ib: ReturnType<typeof createIBClient>,
+  ): Promise<void> {
+    // Build IB side: symbol → signed quantity
     const ibBySymbol = new Map<string, number>();
     for (const p of ibPositions) {
       if (p.sec_type !== 'STK' || !Number.isFinite(p.position) || p.position === 0) continue;
       ibBySymbol.set(p.symbol, Math.floor(p.position));
     }
 
+    // Build bot side: symbol → signed quantity
     const botBySymbol = new Map<string, number>();
     for (const position of this.activePositions.values()) {
       const signed = position.type === 'buy' ? Math.floor(position.volume) : -Math.floor(position.volume);
       botBySymbol.set(position.pair, (botBySymbol.get(position.pair) ?? 0) + signed);
     }
 
+    // Log any mismatch for tracked symbols
     const allSymbols = new Set<string>([...ibBySymbol.keys(), ...botBySymbol.keys()]);
     for (const symbol of allSymbols) {
-      const ibQty = ibBySymbol.get(symbol) ?? 0;
+      const ibQty  = ibBySymbol.get(symbol) ?? 0;
       const botQty = botBySymbol.get(symbol) ?? 0;
       if (ibQty !== botQty) {
         log.warn('IB/Bot position parity mismatch', { symbol, ibQty, botQty });
-        logActivity.warning(`⚠️ Position parity mismatch — ${symbol}: IB=${ibQty}, bot=${botQty}`);
       }
+    }
+
+    // Adopt any IB position the bot has no record of (entry filled after recovery, manual trade, etc.)
+    const { prisma } = await import('./db');
+    let ibOrders: { symbol: string; action: string; status: string }[] = [];
+    try { ibOrders = await ib.getOrders(); } catch { /* non-fatal */ }
+
+    for (const ibPos of ibPositions) {
+      const symbol = ibPos.symbol.toUpperCase();
+      if (ibPos.sec_type !== 'STK' || ibPos.position === 0) continue;
+      if (botBySymbol.has(symbol)) continue; // already tracked
+
+      const isShort    = ibPos.position < 0;
+      const volume     = Math.abs(ibPos.position);
+      const entryPrice = ibPos.avg_cost;
+      if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+        logActivity.warning(`⚠️ Cannot adopt ${symbol}: invalid avg_cost (${ibPos.avg_cost})`);
+        continue;
+      }
+
+      const adoptedType: 'buy' | 'sell' = isShort ? 'sell' : 'buy';
+      const stopLoss    = parseFloat((isShort ? entryPrice * (1 + this.config.stopLossPercent)   : entryPrice * (1 - this.config.stopLossPercent)).toFixed(2));
+      const takeProfit  = parseFloat((isShort ? entryPrice * (1 - this.config.takeProfitPercent) : entryPrice * (1 + this.config.takeProfitPercent)).toFixed(2));
+      const expectedProfitUSD = parseFloat((isShort ? volume * (entryPrice - takeProfit) : volume * (takeProfit - entryPrice)).toFixed(2));
+      const expectedLossUSD   = parseFloat((isShort ? volume * (stopLoss - entryPrice)  : volume * (entryPrice - stopLoss)).toFixed(2));
+      const riskRewardRatio   = expectedLossUSD > 0 ? parseFloat((expectedProfitUSD / expectedLossUSD).toFixed(4)) : null;
+
+      let slOrderId: number | undefined;
+      let tpOrderId: number | undefined;
+
+      if (this.config.autoExecute) {
+        const hasExitOrders = ibOrders.some(
+          o => o.symbol === symbol && o.action === (isShort ? 'BUY' : 'SELL') &&
+               (o.status === 'Submitted' || o.status === 'PreSubmitted')
+        );
+        if (hasExitOrders) {
+          logActivity.info(`🛡️ ${symbol}: existing IB exit orders detected — keeping current native protection`);
+        } else {
+          try {
+            const oca = await ib.placeOcaOrder({
+              symbol, action: isShort ? 'BUY' : 'SELL', quantity: volume,
+              stop_price: stopLoss, limit_price: takeProfit, validate_only: false,
+            });
+            slOrderId = oca.stop_order_id;
+            tpOrderId = oca.limit_order_id;
+            logActivity.info(`🛡️ ${symbol} live-adopt protection: SL #${slOrderId} | TP #${tpOrderId}`);
+          } catch (e) {
+            logActivity.error(`❌ Failed to place protection for live-adopted ${symbol}: ${e}`);
+          }
+        }
+      }
+
+      const adoptedTrade = await prisma.trade.create({
+        data: {
+          pair: symbol, type: adoptedType, entryPrice, volume, stopLoss, takeProfit,
+          status: 'open', txid: `adopted-live-${symbol}-${Date.now()}`,
+          closeReason: 'adopted_from_ib',
+          slOrderId: slOrderId ?? null, tpOrderId: tpOrderId ?? null,
+          expectedProfitUSD, expectedLossUSD, riskRewardRatio,
+        },
+      });
+
+      const posId = adoptedTrade.txid ?? `${symbol}-${adoptedTrade.id}`;
+      this.activePositions.set(posId, {
+        txid: posId, pair: symbol, type: adoptedType, entryPrice, volume,
+        stopLoss, takeProfit, currentPrice: entryPrice, pnl: 0, pnlPercent: 0,
+        timestamp: adoptedTrade.createdAt.getTime(), dbTradeId: adoptedTrade.id,
+        parentOrderId: undefined, slOrderId, tpOrderId,
+        expectedProfitUSD, expectedLossUSD,
+        riskRewardRatio: riskRewardRatio ?? undefined, partialTaken: false,
+      });
+
+      logActivity.warning(
+        `🧩 Live-adopted untracked IB ${isShort ? 'SHORT' : 'LONG'}: ${symbol} | ${volume} shares @ $${entryPrice.toFixed(2)} | ` +
+        `SL: $${stopLoss.toFixed(2)} | TP: $${takeProfit.toFixed(2)}`
+      );
     }
   }
 
