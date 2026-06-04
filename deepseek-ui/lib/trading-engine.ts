@@ -1009,6 +1009,12 @@ export class TradingEngine {
     reason?: string;
     expectedProfitPercent?: number;
   } {
+    // Block if any position for this exact symbol is already open
+    const existingPos = [...this.activePositions.values()].find(p => p.pair === signal.pair);
+    if (existingPos) {
+      return { allowed: false, reason: `Position already open for ${signal.pair} (${existingPos.type})` };
+    }
+
     // Check daily trade limit
     if (this.dailyTradeCount >= this.config.maxDailyTrades) {
       return {
@@ -2219,14 +2225,33 @@ export class TradingEngine {
                  (o.status === 'Submitted' || o.status === 'PreSubmitted')
           );
           if (pendingEntry) {
-            logActivity.info(`⏳ ${trade.pair} entry order still pending in IB — skipping recovery until filled`);
-            // Cancel stored bracket orders and the pending entry so we start fresh next signal
-            await ib.cancelOrdersForSymbol(trade.pair).catch(() => {});
-            await prisma.trade.update({
-              where: { id: trade.id },
-              data: { status: 'closed', closedAt: new Date(), closeReason: 'entry_never_filled' },
+            // Entry order still live in IB — keep it alive and restore to activePositions
+            // so the next analyzeSymbol cycle doesn't place a duplicate order.
+            logActivity.info(`⏳ ${trade.pair} entry order still pending in IB — restoring to memory and waiting for fill`);
+            const posId = trade.txid ?? `${trade.pair}-${trade.id}`;
+            const t = trade as any;
+            this.activePositions.set(posId, {
+              txid:              posId,
+              pair:              trade.pair,
+              type:              trade.type as 'buy' | 'sell',
+              entryPrice:        trade.entryPrice,
+              volume:            trade.volume,
+              stopLoss:          trade.stopLoss,
+              takeProfit:        trade.takeProfit,
+              currentPrice:      trade.entryPrice,
+              pnl:               0,
+              pnlPercent:        0,
+              timestamp:         trade.createdAt.getTime(),
+              dbTradeId:         trade.id,
+              parentOrderId:     trade.txid ? (parseInt(trade.txid) || undefined) : undefined,
+              slOrderId:         t.slOrderId  ?? undefined,
+              tpOrderId:         t.tpOrderId  ?? undefined,
+              expectedProfitUSD: t.expectedProfitUSD ?? undefined,
+              expectedLossUSD:   t.expectedLossUSD   ?? undefined,
+              riskRewardRatio:   t.riskRewardRatio    ?? undefined,
+              partialTaken:      false,
             });
-            markedClosed++;
+            recovered++;
             continue;
           }
         }
