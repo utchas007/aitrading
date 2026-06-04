@@ -3,12 +3,16 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache libc6-compat
+RUN apk add --no-cache libc6-compat openssl
 
 COPY package.json package-lock.json ./
 RUN npm ci --prefer-offline
 
 COPY . .
+
+# Generate Prisma client with Alpine-compatible binaries (linux-musl-openssl-3.0.x)
+ENV PRISMA_ENGINES_MIRROR=https://binaries.prisma.sh
+RUN npx prisma generate
 
 EXPOSE 3003
 

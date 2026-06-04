@@ -58,7 +58,11 @@ COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modul
 
 USER nextjs
 
-EXPOSE 3001
+EXPOSE 3000
+
+# Bind to all interfaces inside the container so other services can reach it
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
 
 # Use dumb-init for proper signal handling (SIGTERM → graceful shutdown)
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]

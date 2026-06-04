@@ -12,7 +12,7 @@ const nextConfig: NextConfig = {
         headers: [
           {
             key: 'Content-Security-Policy',
-            value: "frame-src 'self' http://localhost:3000 http://127.0.0.1:3000;",
+            value: "frame-src 'self' http://localhost:3000 http://127.0.0.1:3000 http://worldmonitor:3000;",
           },
         ],
       },

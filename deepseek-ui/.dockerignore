@@ -1,0 +1,22 @@
+# Dependencies (reinstalled inside container)
+node_modules
+npm-debug.log*
+
+# Next.js build output (rebuilt inside container)
+.next
+out
+
+# Dev / local files
+.env.local
+.env.development
+.env.test
+*.log
+
+# Git
+.git
+.gitignore
+
+# Misc
+.DS_Store
+*.md
+README*
