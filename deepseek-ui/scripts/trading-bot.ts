@@ -7,6 +7,12 @@
  * Or:    npm run bot
  */
 
+// Load .env.local so the standalone bot process picks up OLLAMA_API_URL etc.
+// (Next.js loads this automatically; tsx does not)
+import { config } from 'dotenv';
+config({ path: new URL('../.env.local', import.meta.url).pathname, override: false });
+config({ path: new URL('../.env',       import.meta.url).pathname, override: false });
+
 import '../lib/startup-check'; // Fail fast if required env vars are missing
 import { createTradingEngine } from '../lib/trading-engine';
 import { getActivityLogger } from '../lib/activity-logger';
